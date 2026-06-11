@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Fishbowl">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="22%" r="85%">
+      <stop offset="0%" stop-color="#0a2a36"/>
+      <stop offset="60%" stop-color="#061318"/>
+    </radialGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="9" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="bowl"><circle cx="256" cy="262" r="120"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g filter="url(#glow)">
+    <!-- Water: lower portion inside the bowl, with a wavy surface. -->
+    <g clip-path="url(#bowl)">
+      <path d="M 120 286 q 34 -26 68 0 t 68 0 t 68 0 t 68 0 V 400 H 120 Z"
+            fill="#38D6F0" opacity="0.22"/>
+    </g>
+    <!-- Bowl rim. -->
+    <circle cx="256" cy="262" r="120" fill="none" stroke="#38D6F0" stroke-width="18"/>
+    <!-- Bubbles. -->
+    <circle cx="300" cy="232" r="16" fill="#38D6F0"/>
+    <circle cx="330" cy="196" r="9" fill="#38D6F0" opacity="0.8"/>
+  </g>
+</svg>
