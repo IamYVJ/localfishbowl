@@ -62,10 +62,10 @@ export function buildRoundList(numRounds) {
 // Colours are deliberately distinct on the dark water theme. Index 0 is the
 // aqua accent so a 2-team game reads as "the house colour vs. coral".
 export const TEAM_THEMES = Object.freeze([
-  { name: 'Marlins',   color: '#38D6F0', dim: 'rgba(56, 214, 240, 0.14)' }, // aqua
-  { name: 'Anglers',   color: '#FF9F6B', dim: 'rgba(255, 159, 107, 0.16)' }, // coral
-  { name: 'Tide',      color: '#B38CF5', dim: 'rgba(179, 140, 245, 0.16)' }, // violet
-  { name: 'Reef',      color: '#5EE6A8', dim: 'rgba(94, 230, 168, 0.16)' }, // sea-green
+  { name: 'Blue',   color: '#38D6F0', dim: 'rgba(56, 214, 240, 0.14)' }, // aqua
+  { name: 'Orange', color: '#FF9F6B', dim: 'rgba(255, 159, 107, 0.16)' }, // coral
+  { name: 'Purple', color: '#B38CF5', dim: 'rgba(179, 140, 245, 0.16)' }, // violet
+  { name: 'Green',  color: '#5EE6A8', dim: 'rgba(94, 230, 168, 0.16)' }, // sea-green
 ]);
 
 export function teamTheme(index) {

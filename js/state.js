@@ -136,6 +136,20 @@ export class GameEngine {
     return members[ptr % members.length].id;
   }
 
+  /**
+   * The clue-giver for team `t`, `offset` steps ahead in its rotation.
+   * offset 0 = whoever clues when team `t` is next up; offset 1 = the one after.
+   * Used by the spectator board to show each team's current/next clue-giver.
+   */
+  _teamCluerAt(t, offset = 0) {
+    const members = this._teamMembers(t);
+    if (!members.length) return null;
+    const len = members.length;
+    const ptr = ((this.cluerPointers[t] || 0) + offset) % len;
+    const m = members[(ptr + len) % len];
+    return { id: m.id, name: m.name };
+  }
+
   // -------------------------------------------------------------------------
   // Lobby / config (host only — guarded by main.js)
   // -------------------------------------------------------------------------
@@ -492,6 +506,8 @@ export class GameEngine {
         roundScore: rowScores[this.currentRound] || 0,
         total: rowScores.reduce((a, b) => a + b, 0),
         isCurrent: t === this.currentTeamIndex,
+        cluer: this._teamCluerAt(t, 0),      // who clues when this team is up
+        nextCluer: this._teamCluerAt(t, 1),  // the teammate after them
       };
     });
   }

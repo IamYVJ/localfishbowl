@@ -24,7 +24,7 @@ const root = document.getElementById('app');
 // ---------------------------------------------------------------------------
 const app = {
   screen: 'home',                 // home | join | connecting | game | error | hostleft
-  me: { id: null, name: loadName(), isHost: false },
+  me: { id: null, name: loadName(), isHost: false, isSpectator: false },
   code: loadCode(),
   pub: null,
   priv: null,
@@ -166,6 +166,12 @@ function handleIntent(playerId, msg) {
       hostSync();
       break;
     }
+    case 'spectate':
+      // Watchers never enter the engine — they only ever receive public state
+      // (no private slice), so the current word can never reach them. Future
+      // updates flow through hostSync, which iterates every open connection.
+      net.sendTo(playerId, { type: 'state', pub: engine.publicState(), priv: null });
+      break;
     case 'submitWords': {
       const r = engine.submitWords(playerId, msg.words);
       if (!r.ok) net.sendTo(playerId, { type: 'error', message: r.error });
@@ -306,6 +312,52 @@ function startJoining(rawCode, rawName) {
 }
 
 // ---------------------------------------------------------------------------
+// Spectate an existing game — a read-only TV/big-screen view. A spectator is
+// NOT a player: it never enters the engine, sends no intents, and the host
+// only ever sends it public state (priv === null), so the secret word can
+// never reach it.
+// ---------------------------------------------------------------------------
+function startSpectating(rawCode) {
+  const code = normalizeCode(rawCode);
+  if (code.length !== 4) { app.error = 'Enter the full 4-character code.'; app.screen = 'join'; draw(); return; }
+
+  stopDiscovery();
+  app.code = code; saveCode(code);
+  app.me.isHost = false;
+  app.me.isSpectator = true;
+  app.me.id = null;
+  app.me.name = app.me.name || 'Spectator';
+  app.error = '';
+  app.screen = 'connecting';
+  saveSession({ mode: 'spectate', code });
+  draw();
+
+  net = joinHost(code, {
+    onOpen: () => net.send({ type: 'spectate' }),
+    onData: (msg) => {
+      if (msg.type === 'state') {
+        app.pub = msg.pub; app.priv = null;
+        syncClock(app.pub);
+        app.screen = 'game';
+        draw();
+      }
+    },
+    onClose: () => {
+      if (app.screen === 'game') { app.screen = 'hostleft'; }
+      else { app.screen = 'error'; app.error = 'The host closed the connection.'; }
+      draw();
+    },
+    onError: (err) => {
+      if (!net || !net.isOpen()) {
+        app.screen = 'error';
+        app.error = describePeerError(err);
+        draw();
+      }
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Discovery lifecycle (Join screen).
 // ---------------------------------------------------------------------------
 function startDiscovery() {
@@ -387,7 +439,7 @@ const intents = {
     engine = null;
     app.screen = 'home';
     app.pub = null; app.priv = null; app.error = '';
-    app.me.isHost = false; app.me.id = null;
+    app.me.isHost = false; app.me.isSpectator = false; app.me.id = null;
     app.wordDrafts = null;
     draw();
   },
@@ -395,6 +447,7 @@ const intents = {
 
   host: () => startHosting(),
   join: (code, name) => startJoining(code, name),
+  spectate: (code) => startSpectating(code),
 
   copyCode: async () => {
     if (!app.code) return;
@@ -454,6 +507,10 @@ function resumeSession() {
   }
   if (s.mode === 'join' && s.name) {
     startJoining(s.code, s.name);
+    return true;
+  }
+  if (s.mode === 'spectate') {
+    startSpectating(s.code);
     return true;
   }
   return false;

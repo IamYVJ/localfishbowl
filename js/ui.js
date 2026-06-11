@@ -108,6 +108,9 @@ function joinScreen(app, intents) {
       el('button', { class: 'btn btn-primary', onclick: () => intents.join(codeInput.value, nameInput.value) }, '> CONNECT'),
       el('button', { class: 'btn btn-secondary', onclick: intents.goHome }, '‹ BACK'),
     ),
+    el('button', { class: 'link-btn', onclick: () => intents.spectate(codeInput.value) },
+      '📺 Watch on a TV / big screen'),
+    el('p', { class: 'fine' }, 'Spectators see the scoreboard, timer and whose turn it is — never the secret words.'),
   );
 }
 
@@ -178,6 +181,7 @@ function errorScreen(app, intents) {
 function gameScreen(app, intents) {
   const pub = app.pub;
   if (!pub) return infoScreen('Loading…', 'Syncing with the host.', true);
+  if (app.me.isSpectator) return spectatorScreen(app, intents);
   switch (pub.phase) {
     case 'lobby':       return lobbyScreen(app, intents);
     case 'submission':  return submissionScreen(app, intents);
@@ -714,6 +718,208 @@ function roundColHeader(pub, i) {
   const totalRounds = pub.teams[0] ? pub.teams[0].scores.length : 0;
   const hasSudden = pub.suddenDeath && i === totalRounds - 1;
   return hasSudden ? 'SD' : (base[i] || `R${i + 1}`);
+}
+
+// ---------------------------------------------------------------------------
+// SPECTATOR — a read-only, TV / big-screen view. Shows the round, the turn
+// timer, cards left, the running scoreboard, who is clueing right now, and the
+// next clue-giver for every team. It NEVER shows a word: a spectator's
+// app.priv is always null and the public state carries no word, so the secret
+// physically cannot reach this screen.
+// ---------------------------------------------------------------------------
+function spectatorScreen(app, intents) {
+  const pub = app.pub;
+  let body;
+  switch (pub.phase) {
+    case 'lobby':       body = tvLobby(pub, app); break;
+    case 'submission':  body = tvSubmission(pub); break;
+    case 'turnReady':
+    case 'turnActive':
+    case 'turnSummary': body = tvPlay(app, pub); break;
+    case 'roundBreak':  body = tvRoundBreak(pub, app); break;
+    case 'gameover':    body = tvGameOver(pub, app); break;
+    default:            body = tvLobby(pub, app);
+  }
+
+  return el('main', { class: 'tv' },
+    tvHead(app, pub),
+    body,
+    el('button', { class: 'link-btn tv-exit', onclick: intents.goHome }, 'Leave spectator view'),
+    liveRegion(tvAnnounce(pub)),
+  );
+}
+
+function tvHead(app, pub) {
+  const r = pub.round;
+  const showRound = ['turnReady', 'turnActive', 'turnSummary', 'roundBreak'].includes(pub.phase);
+  return el('header', { class: 'tv-head' },
+    el('div', { class: 'tv-brand' },
+      el('span', { class: 'wordmark-dot' }),
+      el('span', { class: 'wordmark-text' }, 'FISHBOWL'),
+      el('span', { class: 'tv-tag' }, 'SPECTATING'),
+    ),
+    showRound
+      ? el('div', { class: 'tv-round' },
+          el('span', { class: 'round-pill' }, r.isSudden ? 'SUDDEN DEATH' : `ROUND ${r.index + 1}/${r.total}`),
+          el('span', { class: 'tv-round-name' }, r.name))
+      : el('div', { class: 'tv-round' }),
+    el('div', { class: 'tv-room' },
+      el('span', { class: 'tv-room-label' }, 'ROOM'),
+      el('span', { class: 'tv-room-code' }, app.code || '----')),
+  );
+}
+
+// The core in-play layout: a big main column + a board rail on the side.
+function tvPlay(app, pub) {
+  return el('div', { class: 'tv-play' },
+    el('div', { class: 'tv-main' },
+      el('p', { class: 'tv-round-rule' }, pub.round.rule),
+      el('div', { class: 'tv-tiles' },
+        tvTimerTile(app, pub),
+        tvCardsTile(pub),
+      ),
+      tvNow(pub),
+    ),
+    el('aside', { class: 'tv-board' },
+      el('div', { class: 'tv-board-label' }, 'SCORE'),
+      tvScores(pub),
+      el('div', { class: 'tv-board-label' }, 'CLUE-GIVERS'),
+      el('div', { class: 'tv-decks' }, ...pub.teams.map(t => tvDeck(pub, t))),
+    ),
+  );
+}
+
+function tvTimerTile(app, pub) {
+  const active = pub.phase === 'turnActive';
+  const totalMs = (pub.timerSeconds || 60) * 1000;
+  const remainMs = active
+    ? (app.clockMs != null ? app.clockMs : (pub.turnRemainingMs || 0))
+    : totalMs;
+  const pct = Math.max(0, Math.min(100, (remainMs / totalMs) * 100));
+  const low = active && remainMs <= 10000;
+  const team = pub.teams[pub.currentTeamIndex];
+  const accent = team ? team.color : 'var(--accent)';
+  return el('div', { class: 'tv-tile time' + (low ? ' low' : ''), style: `--team:${accent}` },
+    el('div', { class: 'tv-tile-label' }, active ? 'TIME LEFT' : 'TURN TIMER'),
+    el('div', { class: 'tv-tile-value' }, formatTime(remainMs)),
+    el('div', { class: 'tv-tile-bar' }, el('div', { class: 'tv-tile-fill', style: `width:${pct}%;--team:${accent}` })),
+    el('div', { class: 'tv-tile-sub' }, active ? `${pub.guessedThisTurn} guessed this turn` : 'waiting to start'),
+  );
+}
+
+function tvCardsTile(pub) {
+  const pct = pub.bowlTotal ? Math.max(0, Math.min(100, (pub.bowlRemaining / pub.bowlTotal) * 100)) : 0;
+  return el('div', { class: 'tv-tile cards' },
+    el('div', { class: 'tv-tile-label' }, 'CARDS LEFT'),
+    el('div', { class: 'tv-tile-value' }, String(pub.bowlRemaining)),
+    el('div', { class: 'tv-tile-bar' }, el('div', { class: 'tv-tile-fill', style: `width:${pct}%` })),
+    el('div', { class: 'tv-tile-sub' }, `of ${pub.bowlTotal} in the bowl`),
+  );
+}
+
+// The big "who has the bowl right now" panel.
+function tvNow(pub) {
+  const cg = pub.clueGiver;
+  const team = cg ? pub.teams[cg.team] : null;
+  const accent = team ? team.color : 'var(--accent)';
+  const eyebrow = pub.phase === 'turnActive' ? 'CLUEING NOW' : 'UP NEXT';
+  return el('div', { class: 'tv-now', style: `--team:${accent}` },
+    el('div', { class: 'tv-now-eyebrow' }, eyebrow),
+    el('div', { class: 'tv-now-name', style: `color:${accent}` }, cg ? cg.name : '—'),
+    el('div', { class: 'tv-now-team' },
+      el('span', { class: 'team-dot', style: `--team:${accent}` }),
+      team ? team.name : ''),
+  );
+}
+
+function tvScores(pub) {
+  return el('ul', { class: 'tv-scores' },
+    ...pub.teams.map(t => el('li', {
+      class: 'tv-score' + (t.isCurrent ? ' current' : ''),
+      style: `--team:${t.color};--team-dim:${t.dim}`,
+    },
+      el('span', { class: 'team-dot', style: `--team:${t.color}` }),
+      el('span', { class: 'tv-score-name' }, t.name),
+      el('span', { class: 'tv-score-total' }, String(t.total)),
+    )),
+  );
+}
+
+// One team's clue-giver rotation: who is on the bowl (or up next) + who follows.
+function tvDeck(pub, t) {
+  const cluingNow = pub.phase === 'turnActive' && t.isCurrent;
+  const cluer = t.cluer ? t.cluer.name : '—';
+  const next = t.nextCluer ? t.nextCluer.name : null;
+  return el('div', { class: 'tv-deck' + (t.isCurrent ? ' current' : ''), style: `--team:${t.color};--team-dim:${t.dim}` },
+    el('div', { class: 'tv-deck-team' },
+      el('span', { class: 'team-dot', style: `--team:${t.color}` }), t.name),
+    el('div', { class: 'tv-deck-now' + (cluingNow ? ' live' : '') },
+      cluingNow ? el('span', { class: 'tv-live-dot' }) : null,
+      el('span', { class: 'tv-deck-label' }, cluingNow ? 'clueing' : 'up next'),
+      el('span', { class: 'tv-deck-name' }, cluer)),
+    next && next !== cluer ? el('div', { class: 'tv-deck-then' }, `then ${next}`) : null,
+  );
+}
+
+function tvLobby(pub, app) {
+  return el('div', { class: 'tv-center' },
+    el('div', { class: 'tv-big' }, 'Get your phones out'),
+    el('div', { class: 'tv-code-big' }, app.code || '----'),
+    el('div', { class: 'tv-sub' },
+      `${pub.playerCount} ${pub.playerCount === 1 ? 'player' : 'players'} joined · waiting for the host to start`),
+    teamColumns(pub, app, null, false),
+  );
+}
+
+function tvSubmission(pub) {
+  const pct = pub.playerCount ? Math.round(((pub.submittedCount || 0) / pub.playerCount) * 100) : 0;
+  return el('div', { class: 'tv-center' },
+    el('div', { class: 'tv-big' }, 'Filling the bowl'),
+    el('div', { class: 'tv-sub' }, `${pub.submittedCount || 0} of ${pub.playerCount} players ready`),
+    el('div', { class: 'tv-tile-bar wide' }, el('div', { class: 'tv-tile-fill', style: `width:${pct}%` })),
+    el('div', { class: 'tv-sub' }, 'Everyone is secretly adding their words.'),
+  );
+}
+
+function tvRoundBreak(pub, app) {
+  const r = pub.round;
+  const nextType = !r.isFinal ? ROUND_TYPES[nextRoundId(pub)] : null;
+  return el('div', { class: 'tv-center' },
+    el('div', { class: 'summary-eyebrow' }, 'BOWL EMPTY'),
+    el('div', { class: 'tv-big' }, r.isSudden ? 'Sudden death done' : `Round ${r.index + 1} complete`),
+    el('div', { class: 'tv-table' }, fullScoreTable(pub, app)),
+    el('div', { class: 'tv-sub' }, nextType
+      ? `Next up: ${nextType.name} — same words, new challenge.`
+      : 'Final round done — results coming up.'),
+  );
+}
+
+function tvGameOver(pub, app) {
+  const winners = (pub.winners || []).map(i => pub.teams[i]).filter(Boolean);
+  const tie = pub.isTie;
+  const w = winners[0];
+  return el('div', { class: 'tv-center' },
+    el('div', { class: 'win-eyebrow' }, tie ? 'IT’S A TIE' : 'WINNER'),
+    el('div', { class: 'tv-big', style: (!tie && w) ? `color:${w.color}` : '' },
+      tie ? winners.map(t => t.name).join(' & ') : (w ? w.name : '—')),
+    el('div', { class: 'tv-sub' }, tie
+      ? `${w ? w.total : 0} points each`
+      : (w ? `${w.total} points` : '')),
+    el('div', { class: 'tv-table' }, fullScoreTable(pub, app)),
+  );
+}
+
+function tvAnnounce(pub) {
+  switch (pub.phase) {
+    case 'turnActive': return pub.clueGiver ? `${pub.clueGiver.name} is clueing now` : 'Turn in progress';
+    case 'turnReady':  return pub.clueGiver ? `${pub.clueGiver.name} is up next` : 'Get ready';
+    case 'gameover': {
+      if (pub.isTie) return 'It is a tie';
+      const w = (pub.winners || [])[0];
+      return w != null && pub.teams[w] ? `${pub.teams[w].name} wins` : 'Game over';
+    }
+    default: return '';
+  }
 }
 
 // ---------------------------------------------------------------------------
