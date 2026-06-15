@@ -299,6 +299,9 @@ function configEditor(app, intents) {
     toggleRow('Allow skip / pass', c.allowSkip,
       () => intents.setConfig({ allowSkip: !c.allowSkip }),
       'Lets the clue-giver return a hard word to the bowl and draw the next.'),
+    toggleRow('Review guesses after each turn', c.reviewGuesses,
+      () => intents.setConfig({ reviewGuesses: !c.reviewGuesses }),
+      'On the turn-over screen the clue-giver can uncheck a mis-scored word — it loses the point and goes back in the bowl.'),
   );
 }
 
@@ -471,6 +474,10 @@ function turnReadyScreen(app, intents) {
       el('div', { class: 'btn-row' },
         el('button', { class: 'btn btn-primary btn-xl', onclick: () => intents.startTurn() }, '▶ START TURN')),
     ));
+    if (app.me.isHost) {
+      children.push(el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-ghost', onclick: () => intents.skipClueGiver() }, 'Skip to next clue-giver')));
+    }
   } else {
     children.push(panel(null,
       el('p', { class: 'big-prompt', style: team ? `color:${team.color}` : '' }, `${team ? team.name : ''} are up`),
@@ -550,6 +557,30 @@ function timerBar(remainMs, totalMs, accent) {
   );
 }
 
+// Surgically refresh ONLY the running-turn clock between state messages.
+// Called ~4×/s during an active turn — a full re-render at that cadence flickers
+// and resets the timer's CSS transition + low-time pulse animation every tick,
+// so we mutate the existing nodes in place instead of rebuilding the DOM.
+export function updateTimerNodes(root, remainMs, totalMs) {
+  const low = remainMs <= 10000;
+  const text = formatTime(remainMs);
+  const pct = Math.max(0, Math.min(100, (remainMs / totalMs) * 100));
+
+  const bar = root.querySelector('.timer');
+  if (bar) {
+    bar.classList.toggle('low', low);
+    const fill = bar.querySelector('.timer-fill');
+    if (fill) fill.style.width = pct + '%';
+    const txt = bar.querySelector('.timer-text');
+    if (txt && txt.textContent !== text) txt.textContent = text;
+  }
+  const chip = root.querySelector('.timer-chip');
+  if (chip) {
+    chip.classList.toggle('low', low);
+    if (chip.textContent !== text) chip.textContent = text;
+  }
+}
+
 function timerChip(remainMs, accent) {
   const low = remainMs <= 10000;
   return el('span', { class: 'timer-chip' + (low ? ' low' : ''), style: `--team:${accent}` }, formatTime(remainMs));
@@ -571,6 +602,8 @@ function turnSummaryScreen(app, intents) {
   const team = s ? pub.teams[s.teamIndex] : null;
   const nextTeam = pub.teams[pub.currentTeamIndex];
 
+  const roundEnding = pub.bowlRemaining === 0; // next continue lands on the round break
+
   const children = [
     wordmark(intents),
     el('div', { class: 'summary-banner', style: team ? `--team:${team.color};--team-dim:${team.dim}` : '' },
@@ -579,10 +612,7 @@ function turnSummaryScreen(app, intents) {
         `+${s ? s.scored : 0}`),
       el('div', { class: 'summary-team' }, team ? team.name : ''),
     ),
-    s && s.words.length
-      ? panel('WORDS GUESSED THIS TURN',
-          el('ul', { class: 'word-list' }, ...s.words.map(w => el('li', { class: 'word-chip' }, w))))
-      : panel(null, el('p', { class: 'fine' }, 'No words guessed that turn.')),
+    guessReviewPanel(s, priv, intents),
     el('div', { class: 'next-up' },
       el('span', { class: 'team-dot', style: nextTeam ? `--team:${nextTeam.color}` : '' }),
       'Up next: ', el('strong', {}, nextTeam ? nextTeam.name : '—'),
@@ -593,12 +623,41 @@ function turnSummaryScreen(app, intents) {
 
   if (priv.canContinue) {
     children.push(el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-primary', onclick: () => intents.continueTurn() }, '> NEXT TURN')));
+      el('button', { class: 'btn btn-primary', onclick: () => intents.continueTurn() },
+        roundEnding ? '> FINISH ROUND' : '> NEXT TURN')));
   } else {
     children.push(el('p', { class: 'fine' }, 'Waiting for the next turn to begin…'));
   }
 
   return shell(...children, liveRegion('Turn over'));
+}
+
+// The guessed-word recap. For the clue-giver who just played (when review is
+// on) it's an interactive checklist — unchecking a word drops the point and
+// sends it back to the bowl. Everyone else sees the plain counted list.
+function guessReviewPanel(s, priv, intents) {
+  if (priv.canReviewGuesses && s && s.items && s.items.length) {
+    return panel('REVIEW — UNCHECK ANYTHING THAT SHOULDN’T COUNT',
+      el('ul', { class: 'word-list review' },
+        ...s.items.map(it => el('li', {},
+          el('label', { class: 'review-chip' + (it.included ? ' on' : ' off') },
+            el('input', {
+              type: 'checkbox', ...(it.included ? { checked: true } : {}),
+              'aria-label': it.text,
+              onchange: (e) => intents.reviewGuess(it.id, e.target.checked),
+            }),
+            el('span', { class: 'review-box' }),
+            el('span', { class: 'review-word' }, it.text),
+          )))),
+      el('p', { class: 'fine' }, 'Unchecked words lose their point and go back in the bowl to be replayed.'),
+    );
+  }
+  if (s && s.words.length) {
+    return panel('WORDS GUESSED THIS TURN',
+      el('ul', { class: 'word-list' }, ...s.words.map(w => el('li', { class: 'word-chip' }, w))));
+  }
+  return panel(null, el('p', { class: 'fine' },
+    s && s.items && s.items.length ? 'All words sent back to the bowl.' : 'No words guessed that turn.'));
 }
 
 // ---------------------------------------------------------------------------

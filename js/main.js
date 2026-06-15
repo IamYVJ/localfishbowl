@@ -10,7 +10,7 @@
 
 import { GameEngine } from './state.js';
 import { createHost, joinHost, createDiscovery, describePeerError, peerIdForCode } from './net.js';
-import { render } from './ui.js';
+import { render, updateTimerNodes } from './ui.js';
 import {
   generateRoomCode, normalizeCode, copyText,
   loadName, saveName, loadCode, saveCode,
@@ -53,12 +53,17 @@ let turnTimer = null;      // host-side authoritative turn-end timeout
 let discovery = null;
 let discoveryTimer = null;
 
-// A single low-frequency loop drives the visible turn countdown.
+// A single low-frequency loop drives the visible turn countdown. It mutates ONLY
+// the timer nodes in place — calling the full draw() here would tear down and
+// rebuild the entire DOM 4×/second, which flickers and resets the timer's CSS
+// animation on every tick. Phase/state changes still trigger a full re-render
+// via the host's state messages.
 setInterval(() => {
   if (app.screen !== 'game' || !app.pub || app.pub.phase !== 'turnActive') return;
   if (app.localDeadline == null) return;
   app.clockMs = Math.max(0, app.localDeadline - performance.now());
-  draw();
+  const totalMs = (app.pub.timerSeconds || 60) * 1000;
+  updateTimerNodes(root, app.clockMs, totalMs);
 }, 250);
 
 // ---------------------------------------------------------------------------
@@ -162,6 +167,12 @@ function handleIntent(playerId, msg) {
     case 'join': {
       const r = engine.addPlayer(playerId, msg.name, { isHost: false });
       if (!r.ok) { net.sendTo(playerId, { type: 'rejected', message: r.error }); return; }
+      // A reconnect (or same-name takeover) reclaimed a seat under a new
+      // connection id. Drop the old, now-orphaned connection so it can't linger
+      // or later fire a disconnect against the seat we just handed back.
+      if (r.reconnected && r.prevId && r.prevId !== playerId) {
+        net.dropConnection(r.prevId);
+      }
       net.sendTo(playerId, { type: 'welcome', playerId });
       hostSync();
       break;
@@ -198,6 +209,12 @@ function handleIntent(playerId, msg) {
       break;
     }
     case 'continueTurn': engine.continueFromSummary(playerId); hostSync(); break;
+    case 'reviewGuess': {
+      const r = engine.reviewGuessedWord(playerId, msg.wordId, msg.included);
+      if (!r.ok) net.sendTo(playerId, { type: 'error', message: r.error });
+      hostSync();
+      break;
+    }
     default: break;
   }
 }
@@ -490,6 +507,7 @@ const intents = {
   gotIt: () => sendIntent({ type: 'gotIt' }),
   skip: () => sendIntent({ type: 'skip' }),
   continueTurn: () => sendIntent({ type: 'continueTurn' }),
+  reviewGuess: (wordId, included) => sendIntent({ type: 'reviewGuess', wordId, included }),
 };
 
 // ---------------------------------------------------------------------------

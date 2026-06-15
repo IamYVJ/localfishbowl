@@ -30,7 +30,9 @@ wins (ties can be settled with a **sudden-death** tiebreaker).
 
 **Host-configurable before the game starts:** words per player (default 5),
 turn timer (default 60s), number of teams (2–4), whether to include the 4th
-Statue round, and whether the clue-giver may skip/pass a word (default off).
+Statue round, whether the clue-giver may skip/pass a word (default off), and
+whether the clue-giver may review their guesses after each turn (default off) —
+unchecking a mis-scored word drops the point and returns it to the bowl.
 
 ## How it works
 

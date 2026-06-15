@@ -90,6 +90,14 @@ export function createHost(code, handlers = {}) {
         if (conn.open) trySend(conn, msg);
       }
     },
+    // Forget and close a connection without firing onDisconnect (we remove it
+    // from the map first, so the conn's own close handler short-circuits). Used
+    // when a reconnecting player takes over a seat held by a stale connection.
+    dropConnection(connId) {
+      const conn = connections.get(connId);
+      connections.delete(connId);
+      if (conn) { try { conn.close(); } catch (_) {} }
+    },
     destroy() { try { peer.destroy(); } catch (_) {} },
   };
 }

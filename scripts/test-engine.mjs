@@ -191,6 +191,109 @@ section('Skip toggle');
 }
 
 // ===========================================================================
+section('Skip clue-giver — host escape hatch, even when the host is clueing');
+{
+  const eng = freshGame({ players: 4, numTeams: 2 }); // host on team 0 with p2
+  submitAll(eng);
+  ok(eng.phase === PHASES.TURN_READY, 'ready for the first turn');
+
+  const firstCluer = eng.currentClueGiverId;
+  ok(firstCluer === eng.hostId, 'host is the first clue-giver in this layout');
+
+  // Non-host cannot skip the clue-giver.
+  eng.skipClueGiver('p1');
+  ok(eng.currentClueGiverId === firstCluer, 'a non-host skip is ignored');
+
+  // Host skips even though the host is the one clueing → hands off to a teammate.
+  eng.skipClueGiver(eng.hostId);
+  const nextCluer = eng.currentClueGiverId;
+  ok(nextCluer !== firstCluer, 'host skipped themselves to the next teammate');
+  ok(eng.getPlayer(nextCluer).team === eng.getPlayer(firstCluer).team,
+    'skip stays within the same team that is up');
+
+  // Skip only applies while a turn is pending, not mid-turn.
+  eng.startTurn(eng.currentClueGiverId);
+  const midCluer = eng.currentClueGiverId;
+  eng.skipClueGiver(eng.hostId);
+  ok(eng.currentClueGiverId === midCluer, 'skip is a no-op once the turn is active');
+}
+
+// ===========================================================================
+section('Review guesses — clue-giver can uncheck a mis-scored word');
+{
+  const eng = freshGame({ players: 4, numTeams: 2 });
+  eng.setConfig({ reviewGuesses: true });
+  submitAll(eng);
+
+  const cluer = eng.currentClueGiverId;
+  const team = eng.getPlayer(cluer).team;
+  eng.startTurn(cluer);
+  eng.gotIt(cluer);
+  eng.gotIt(cluer);            // two words counted for this team this round
+  eng.endTurnByTime();
+
+  ok(eng.phase === PHASES.TURN_SUMMARY, 'timed turn lands on the recap');
+  const s = eng.lastTurnSummary;
+  ok(s.cluerId === cluer, 'summary records the clue-giver who played');
+  ok(s.items.length === 2 && s.scored === 2, 'two words recorded as counted');
+  ok(eng.scores[team][0] === 2, 'team scored 2 this round');
+
+  // Only the clue-giver who played may edit.
+  const other = eng.players.find(p => p.id !== cluer).id;
+  ok(!eng.reviewGuessedWord(other, s.items[0].id, false).ok, 'a different player cannot edit');
+  ok(!eng.reviewGuessedWord(cluer, 'no-such-word', false).ok, 'unknown word rejected');
+
+  // Uncheck one → point lost, word returns to the bowl to be replayed.
+  const wid = s.items[0].id;
+  const remBefore = eng.remaining.length;
+  ok(eng.reviewGuessedWord(cluer, wid, false).ok, 'clue-giver unchecks a word');
+  ok(eng.scores[team][0] === 1, 'point removed on uncheck');
+  ok(eng.lastTurnSummary.scored === 1 && eng.lastTurnSummary.words.length === 1, 'recap count drops to 1');
+  ok(eng.remaining.includes(wid) && eng.remaining.length === remBefore + 1, 'unchecked word returned to the bowl');
+
+  // Re-check it → point restored, word pulled back out.
+  ok(eng.reviewGuessedWord(cluer, wid, true).ok, 'clue-giver re-checks the word');
+  ok(eng.scores[team][0] === 2, 'point restored on re-check');
+  ok(!eng.remaining.includes(wid) && eng.remaining.length === remBefore, 'word removed from the bowl again');
+
+  // Review is rejected when the toggle is off.
+  const offGame = freshGame({ players: 4, numTeams: 2 });
+  submitAll(offGame);
+  const c2 = offGame.currentClueGiverId;
+  offGame.startTurn(c2); offGame.gotIt(c2); offGame.endTurnByTime();
+  ok(!offGame.reviewGuessedWord(c2, offGame.lastTurnSummary.items[0].id, false).ok,
+    'review rejected when the toggle is off');
+}
+
+// ===========================================================================
+section('Review guesses — bowl-emptying turn still gets a recap');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, wordsPerPlayer: 1 }); // 4-word bowl
+  eng.setConfig({ reviewGuesses: true });
+  submitAll(eng);
+
+  const cluer = eng.currentClueGiverId;
+  eng.startTurn(cluer);
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+  ok(eng.phase === PHASES.TURN_SUMMARY, 'emptying the bowl pauses on the recap when review is on');
+  ok(eng.remaining.length === 0, 'bowl is empty going into the recap');
+
+  // Uncheck one → it returns to the bowl → continue should resume play.
+  const wid = eng.lastTurnSummary.items[0].id;
+  eng.reviewGuessedWord(cluer, wid, false);
+  eng.continueFromSummary(eng.hostId);
+  ok(eng.phase === PHASES.TURN_READY, 'an unchecked word keeps the round going');
+
+  // Replay the returned word; with everything counted, the round ends.
+  const c2 = eng.currentClueGiverId;
+  eng.startTurn(c2);
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+  ok(eng.phase === PHASES.TURN_SUMMARY, 'back on the recap after replaying the word');
+  eng.continueFromSummary(eng.hostId);
+  ok(eng.phase === PHASES.ROUND_BREAK, 'round ends once every word is counted');
+}
+
+// ===========================================================================
 section('Config: 4th round adds Statue; team count reclamp');
 {
   const eng = freshGame({ numRounds: 4 });
@@ -214,6 +317,51 @@ section('Reconnect reclaims the seat by name');
   const res = eng.addPlayer('newconn', victim.name);
   ok(res.ok && res.reconnected, 'reconnect by name succeeds');
   ok(res.player.id === 'newconn' && res.player.online, 'seat reclaimed with new connection id');
+  ok(res.prevId === oldId, 'reports the previous connection id for cleanup');
+}
+
+// ===========================================================================
+section('Reconnect works even when the disconnect was never detected');
+{
+  // The real-world bug: an abrupt drop (sleep / Wi-Fi / tab close) leaves the
+  // seat still flagged online, because no clean `close` ever reached the host.
+  const eng = freshGame();
+  submitAll(eng);
+  const victim = eng.players.find(p => p.id !== eng.hostId);
+  const oldId = victim.id;
+  ok(victim.online, 'seat is still flagged online (no close event fired)');
+
+  const res = eng.addPlayer('reconn', victim.name.toUpperCase()); // case-insensitive
+  ok(res.ok && res.reconnected, 'same name reclaims the seat despite the stale online flag');
+  ok(res.prevId === oldId && res.player.id === 'reconn', 'new id takes over, old id reported');
+  ok(eng.players.filter(p => p.name.toLowerCase() === victim.name.toLowerCase()).length === 1,
+    'no duplicate seat is created');
+
+  // A late close for the dead connection must not knock the reclaimed seat out.
+  eng.markOffline(oldId);
+  ok(eng.getPlayer('reconn') && eng.getPlayer('reconn').online,
+    'a late disconnect for the old id is a harmless no-op');
+}
+
+// ===========================================================================
+section('Reconnect mid-summary keeps clue-giver permissions');
+{
+  const eng = freshGame({ players: 4, numTeams: 2 });
+  eng.setConfig({ reviewGuesses: true });
+  submitAll(eng);
+  const cluer = eng.currentClueGiverId;
+  eng.startTurn(cluer);
+  eng.gotIt(cluer);
+  eng.endTurnByTime();
+  ok(eng.phase === PHASES.TURN_SUMMARY && eng.lastTurnSummary.cluerId === cluer,
+    'recap remembers the clue-giver by id');
+
+  const res = eng.addPlayer('cluer-reconn', eng.getPlayer(cluer).name);
+  ok(res.ok && res.reconnected, 'clue-giver reconnects during the recap');
+  ok(eng.lastTurnSummary.cluerId === 'cluer-reconn',
+    'recap follows the clue-giver to the new connection id');
+  ok(eng.reviewGuessedWord('cluer-reconn', eng.lastTurnSummary.items[0].id, false).ok,
+    'reconnected clue-giver can still adjust their guesses');
 }
 
 // ===========================================================================

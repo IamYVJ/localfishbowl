@@ -27,6 +27,8 @@ export const DEFAULTS = Object.freeze({
   numTeams: 2,         // 2–4
   numRounds: 3,        // 3, or 4 to include the STATUE round
   allowSkip: false,    // may the clue-giver pass on a word?
+  reviewGuesses: false,// after each turn, may the clue-giver uncheck a
+                       // mis-scored word? (loses the point, returns to bowl)
 });
 
 export const LIMITS = Object.freeze({
@@ -114,6 +116,7 @@ export function normalizeConfig(cfg = {}) {
     numTeams:       clampInt(c.numTeams, LIMITS.numTeams.min, LIMITS.numTeams.max, DEFAULTS.numTeams),
     numRounds:      clampInt(c.numRounds, LIMITS.numRounds.min, LIMITS.numRounds.max, DEFAULTS.numRounds),
     allowSkip:      !!c.allowSkip,
+    reviewGuesses:  !!c.reviewGuesses,
   };
 }
 

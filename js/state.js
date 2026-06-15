@@ -65,20 +65,25 @@ export class GameEngine {
     const trimmed = (name || '').trim().slice(0, 16);
     if (!trimmed) return { ok: false, error: 'Name required.' };
 
-    // Reconnect: a known name that is currently offline reclaims its seat.
+    // Reconnect: a known name reclaims its seat. We allow this even when the
+    // seat still *looks* online — an abrupt disconnect (device sleep, Wi-Fi
+    // drop, tab close) frequently never delivers a clean close, so the stale
+    // `online` flag must NOT lock a returning player out of their own seat.
+    // The host drops the old (now-orphaned) connection after we hand back the
+    // seat. Trade-off: in the lobby two people choosing the identical name will
+    // share one seat — the later joiner takes it over (the earlier connection
+    // is closed cleanly) — which is the same name-reclaim model we rely on for
+    // reconnects.
     const existing = this.players.find(
       p => p.name.toLowerCase() === trimmed.toLowerCase()
     );
     if (existing) {
-      if (existing.online) {
-        return { ok: false, error: `The name "${trimmed}" is already taken.` };
-      }
       const oldId = existing.id;
       existing.online = true;
       existing.id = id;
       if (oldId !== id) this._remapPlayerId(oldId, id);
       if (isHost) this.hostId = id;
-      return { ok: true, player: existing, reconnected: true };
+      return { ok: true, player: existing, reconnected: true, prevId: oldId };
     }
 
     if (this.phase !== PHASES.LOBBY) {
@@ -99,6 +104,11 @@ export class GameEngine {
   _remapPlayerId(oldId, newId) {
     if (oldId === newId) return;
     if (this.hostId === oldId) this.hostId = newId;
+    // The turn recap remembers its clue-giver by id (for review/continue
+    // permissions); keep it pointing at the reconnected player.
+    if (this.lastTurnSummary && this.lastTurnSummary.cluerId === oldId) {
+      this.lastTurnSummary.cluerId = newId;
+    }
   }
 
   markOffline(id) {
@@ -331,16 +341,25 @@ export class GameEngine {
 
   _concludeTurn(reason) {
     const justPlayed = this.currentTeamIndex;
+    // Capture who clued BEFORE advancing the cursor — the review step (below)
+    // is restricted to the clue-giver who actually just played this turn.
+    const cluerId = this.currentClueGiverId;
     // The clue-giver's turn is over: advance this team's rotation cursor.
     this.cluerPointers[justPlayed] = (this.cluerPointers[justPlayed] || 0) + 1;
 
-    const roundComplete = (reason === 'empty');
-
+    // Every word scored this turn, kept as toggleable items so the clue-giver
+    // can later uncheck a mis-scored one (when review is enabled).
+    const items = this.guessedThisTurn.map(wid => ({
+      id: wid, text: this._wordText(wid), included: true,
+    }));
     this.lastTurnSummary = {
       teamIndex: justPlayed,
       reason,
-      scored: this.guessedThisTurn.length,
-      words: this.guessedThisTurn.map(wid => this._wordText(wid)),
+      round: this.currentRound,
+      cluerId,
+      items,
+      scored: items.length,
+      words: items.map(it => it.text),
     };
 
     // Pass to the next team (every team is non-empty per start validation).
@@ -349,7 +368,56 @@ export class GameEngine {
     this.turnEndsAt = null;
     this.guessedThisTurn = [];
 
+    // With review on, even a bowl-emptying turn pauses on the recap first so its
+    // words can be corrected; continueFromSummary then routes to the round break
+    // (or back to play if a word was sent back). With review off, an emptied
+    // bowl ends the round straight away, as before.
+    const roundComplete = (reason === 'empty') && !this.config.reviewGuesses;
     this.phase = roundComplete ? PHASES.ROUND_BREAK : PHASES.TURN_SUMMARY;
+  }
+
+  /** Recompute the derived score/word fields after a review toggle. */
+  _refreshSummaryDerived() {
+    const s = this.lastTurnSummary;
+    if (!s || !s.items) return;
+    const included = s.items.filter(it => it.included);
+    s.words = included.map(it => it.text);
+    s.scored = included.length;
+  }
+
+  /**
+   * Review step (host-toggle `reviewGuesses`): the clue-giver who just played
+   * unchecks a mis-scored word (loses the point, word returns to the bowl to be
+   * replayed) or re-checks one. Only valid on the turn recap, only by that
+   * clue-giver.
+   */
+  reviewGuessedWord(actorId, wordId, included) {
+    if (this.phase !== PHASES.TURN_SUMMARY) return { ok: false, error: 'Not reviewing a turn.' };
+    if (!this.config.reviewGuesses) return { ok: false, error: 'Word review is turned off.' };
+    const s = this.lastTurnSummary;
+    if (!s || !s.items) return { ok: false, error: 'Nothing to review.' };
+    if (actorId !== s.cluerId) return { ok: false, error: 'Only the clue-giver can adjust their words.' };
+    const item = s.items.find(it => it.id === wordId);
+    if (!item) return { ok: false, error: 'Unknown word.' };
+
+    const want = !!included;
+    if (item.included === want) return { ok: true }; // no-op
+
+    const row = this.scores[s.teamIndex];
+    if (want) {
+      // Re-count it: restore the point and pull it back out of the bowl.
+      row[s.round] = (row[s.round] || 0) + 1;
+      const i = this.remaining.indexOf(wordId);
+      if (i !== -1) this.remaining.splice(i, 1);
+      item.included = true;
+    } else {
+      // Discount it: drop the point and return the word to the bowl to replay.
+      row[s.round] = Math.max(0, (row[s.round] || 0) - 1);
+      if (!this.remaining.includes(wordId)) this.remaining.push(wordId);
+      item.included = false;
+    }
+    this._refreshSummaryDerived();
+    return { ok: true };
   }
 
   _wordText(wid) {
@@ -361,7 +429,10 @@ export class GameEngine {
   continueFromSummary(id) {
     if (this.phase !== PHASES.TURN_SUMMARY) return;
     if (id !== this.hostId && id !== this.currentClueGiverId) return;
-    this.phase = PHASES.TURN_READY;
+    // If the bowl emptied (incl. after a review left every word counted), the
+    // round is over; otherwise hand off to the next clue-giver. With review off
+    // the bowl is always non-empty here, so this stays TURN_READY as before.
+    this.phase = this.remaining.length ? PHASES.TURN_READY : PHASES.ROUND_BREAK;
   }
 
   get isFinalRound() { return this.currentRound >= this.roundTypes.length - 1; }
@@ -603,6 +674,9 @@ export class GameEngine {
 
     if (this.phase === PHASES.TURN_SUMMARY) {
       priv.canContinue = (id === this.hostId) || isClue;
+      // Only the clue-giver who just played may fix their scored words.
+      priv.canReviewGuesses = !!this.config.reviewGuesses
+        && !!this.lastTurnSummary && id === this.lastTurnSummary.cluerId;
     }
 
     return priv;
