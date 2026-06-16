@@ -302,6 +302,9 @@ function configEditor(app, intents) {
     toggleRow('Review guesses after each turn', c.reviewGuesses,
       () => intents.setConfig({ reviewGuesses: !c.reviewGuesses }),
       'On the turn-over screen the clue-giver can uncheck a mis-scored word — it loses the point and goes back in the bowl.'),
+    toggleRow('Show guessed words to everyone', c.showGuessedWords,
+      () => intents.setConfig({ showGuessedWords: !c.showGuessedWords }),
+      'When on, the turn recap lists the guessed words for all to see. Turn off to keep the recurring bowl secret — only the clue-giver who just played sees the words; everyone else sees the count.'),
   );
 }
 
@@ -449,11 +452,17 @@ function lastTurnRecap(pub) {
   const s = pub.lastTurnSummary;
   if (!s) return null;
   const team = pub.teams[s.teamIndex];
+  let body;
+  if (s.words.length) {
+    body = el('ul', { class: 'word-list small' }, ...s.words.map(w => el('li', { class: 'word-chip' }, w)));
+  } else if (s.hidden && s.scored) {
+    body = el('p', { class: 'fine' }, 'Words hidden to keep the bowl secret.');
+  } else {
+    body = el('p', { class: 'fine' }, 'No words guessed.');
+  }
   return el('div', { class: 'recap' },
     el('div', { class: 'section-label' }, `LAST TURN · ${team ? team.name : ''} · ${s.scored} guessed`),
-    s.words.length
-      ? el('ul', { class: 'word-list small' }, ...s.words.map(w => el('li', { class: 'word-chip' }, w)))
-      : el('p', { class: 'fine' }, 'No words guessed.'),
+    body,
   );
 }
 
@@ -634,12 +643,17 @@ function turnSummaryScreen(app, intents) {
 
 // The guessed-word recap. For the clue-giver who just played (when review is
 // on) it's an interactive checklist — unchecking a word drops the point and
-// sends it back to the bowl. Everyone else sees the plain counted list.
+// sends it back to the bowl. Everyone else sees the plain counted list, unless
+// the host has hidden the words — then only the just-played clue-giver (who
+// gets the full text privately) sees them, and others see a count only.
 function guessReviewPanel(s, priv, intents) {
-  if (priv.canReviewGuesses && s && s.items && s.items.length) {
+  // The just-played clue-giver always has the full word text privately, even
+  // when the host has hidden it from everyone else.
+  const reviewItems = priv.summaryItems || (s && s.items);
+  if (priv.canReviewGuesses && reviewItems && reviewItems.length) {
     return panel('REVIEW — UNCHECK ANYTHING THAT SHOULDN’T COUNT',
       el('ul', { class: 'word-list review' },
-        ...s.items.map(it => el('li', {},
+        ...reviewItems.map(it => el('li', {},
           el('label', { class: 'review-chip' + (it.included ? ' on' : ' off') },
             el('input', {
               type: 'checkbox', ...(it.included ? { checked: true } : {}),
@@ -651,6 +665,19 @@ function guessReviewPanel(s, priv, intents) {
           )))),
       el('p', { class: 'fine' }, 'Unchecked words lose their point and go back in the bowl to be replayed.'),
     );
+  }
+  // The just-played clue-giver sees their own words even when hidden from others.
+  const ownWords = priv.summaryWords;
+  if (ownWords && ownWords.length) {
+    return panel('WORDS GUESSED THIS TURN',
+      el('ul', { class: 'word-list' }, ...ownWords.map(w => el('li', { class: 'word-chip' }, w))));
+  }
+  // Host hid the words: everyone but the clue-giver sees the count only.
+  if (s && s.hidden) {
+    return panel(null, el('p', { class: 'fine' },
+      s.scored
+        ? `${s.scored} ${s.scored === 1 ? 'word' : 'words'} guessed — hidden to keep the bowl secret.`
+        : 'No words guessed that turn.'));
   }
   if (s && s.words.length) {
     return panel('WORDS GUESSED THIS TURN',
@@ -741,7 +768,7 @@ function gameOverScreen(app, intents) {
   const children = [wordmark(intents), banner,
     el('div', { class: 'section-label' }, 'TEAM SCORES'),
     fullScoreTable(pub, app),
-    el('div', { class: 'section-label' }, 'PLAYER SCORES'),
+    statsLabel(),
     playerStatsTable(pub, app),
   ];
 
@@ -784,27 +811,48 @@ function roundColHeader(pub, i) {
   return hasSudden ? 'SD' : (base[i] || `R${i + 1}`);
 }
 
-// A per-player leaderboard: words each player got guessed as clue-giver, by
-// round, with totals. Sorted highest-first so the MVP sits on top; the local
-// player's row is highlighted.
+// A per-player table, one row per player, ordered by points (highest first so
+// the MVP sits on top); the local player's row is highlighted. Each round cell
+// — and the Total — reads "guessed / skipped / seen", where guessed is the
+// words this player got across as clue-giver, skipped is the words they passed
+// on, and seen = guessed + skipped (every word they held that round).
 function playerStatsTable(pub, app) {
   const rounds = pub.teams[0] ? pub.teams[0].scores.length : 0;
   const rows = [];
   pub.teams.forEach(t => (t.members || []).forEach(m =>
-    rows.push({ ...m, color: t.color, teamName: t.name })));
+    rows.push({ ...m, color: t.color })));
   rows.sort((a, b) => (b.total || 0) - (a.total || 0) || a.name.localeCompare(b.name));
+
+  const triple = (got, skipped) => el('span', { class: 'stat-triple' },
+    el('span', { class: 'stat-got' }, String(got)),
+    el('span', { class: 'stat-sep' }, '/'),
+    el('span', { class: 'stat-skip' }, String(skipped)),
+    el('span', { class: 'stat-sep' }, '/'),
+    el('span', { class: 'stat-seen' }, String(got + skipped)),
+  );
 
   const head = el('tr', {}, el('th', {}, 'Player'),
     ...Array.from({ length: rounds }, (_, i) => el('th', {}, roundColHeader(pub, i))),
     el('th', { class: 'tot-col' }, 'Total'));
-  const body = rows.map(m => el('tr', { class: m.id === app.me.id ? 'current' : '' },
-    el('td', {},
-      el('span', { class: 'team-dot', style: `--team:${m.color}` }),
-      m.name + (m.id === app.me.id ? ' (you)' : '')),
-    ...Array.from({ length: rounds }, (_, i) => el('td', {}, String((m.scores || [])[i] || 0))),
-    el('td', { class: 'tot-col' }, String(m.total || 0)),
-  ));
-  return el('table', { class: 'score-table' }, el('thead', {}, head), el('tbody', {}, ...body));
+  const body = rows.map(m => {
+    const sc = m.scores || [], sk = m.skips || [];
+    const gotTot = sc.reduce((a, b) => a + (b || 0), 0);
+    const skipTot = sk.reduce((a, b) => a + (b || 0), 0);
+    return el('tr', { class: m.id === app.me.id ? 'current' : '' },
+      el('td', {},
+        el('span', { class: 'team-dot', style: `--team:${m.color}` }),
+        m.name + (m.id === app.me.id ? ' (you)' : '')),
+      ...Array.from({ length: rounds }, (_, i) => el('td', {}, triple(sc[i] || 0, sk[i] || 0))),
+      el('td', { class: 'tot-col' }, triple(gotTot, skipTot)),
+    );
+  });
+  return el('table', { class: 'score-table stat-table' }, el('thead', {}, head), el('tbody', {}, ...body));
+}
+
+// The "guessed / skipped / seen" legend that captions the player stats table.
+function statsLabel() {
+  return el('div', { class: 'section-label' }, 'PLAYER SCORES',
+    el('span', { class: 'label-note' }, '  ·  guessed / skipped / seen'));
 }
 
 // ---------------------------------------------------------------------------
@@ -995,7 +1043,7 @@ function tvGameOver(pub, app) {
     el('div', { class: 'tv-table' },
       el('div', { class: 'section-label' }, 'TEAM SCORES'),
       fullScoreTable(pub, app),
-      el('div', { class: 'section-label' }, 'PLAYER SCORES'),
+      statsLabel(),
       playerStatsTable(pub, app),
     ),
   );

@@ -29,6 +29,10 @@ export const DEFAULTS = Object.freeze({
   allowSkip: false,    // may the clue-giver pass on a word?
   reviewGuesses: false,// after each turn, may the clue-giver uncheck a
                        // mis-scored word? (loses the point, returns to bowl)
+  showGuessedWords: true, // after each turn, is the list of guessed words shown
+                       // to EVERYONE? Off = only the clue-giver who just played
+                       // sees the words; others see counts only. Keeps the
+                       // recurring bowl secret since the same words come back.
 });
 
 export const LIMITS = Object.freeze({
@@ -117,6 +121,7 @@ export function normalizeConfig(cfg = {}) {
     numRounds:      clampInt(c.numRounds, LIMITS.numRounds.min, LIMITS.numRounds.max, DEFAULTS.numRounds),
     allowSkip:      !!c.allowSkip,
     reviewGuesses:  !!c.reviewGuesses,
+    showGuessedWords: !!c.showGuessedWords,
   };
 }
 

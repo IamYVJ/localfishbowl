@@ -184,10 +184,15 @@ section('Skip toggle');
   on.startTurn(on.currentClueGiverId);
   const remBefore = on.remaining.length;
   const wordBefore = on.currentWordId;
+  const cluer = on.getPlayer(on.currentClueGiverId);
+  ok((cluer.skips[0] || 0) === 0, 'clue-giver starts the turn with zero skips in round 0');
   const r = on.skip(on.currentClueGiverId);
   ok(r.ok, 'skip allowed when enabled');
   ok(on.remaining.includes(wordBefore), 'skipped word returned to the bowl');
   ok(on.publicState().bowlRemaining === remBefore + 1, 'bowl-remaining count unchanged by a skip');
+  ok(cluer.skips[0] === 1, 'skip tallied against the clue-giver in round 0');
+  on.skip(on.currentClueGiverId);
+  ok(cluer.skips[0] === 2, 'a second skip increments the round-0 tally');
 }
 
 // ===========================================================================
@@ -416,6 +421,117 @@ section('Per-player stats — review, play-again and serialize');
   eng.playAgain(eng.hostId);
   ok(eng.players.every(p => (p.scores || []).reduce((a, b) => a + b, 0) === 0),
     'play-again clears per-player stats');
+}
+
+// ===========================================================================
+section('Per-player skips — round-wise, exposed, round-trips, and resets');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, allowSkip: true });
+  submitAll(eng);
+  const cluer = eng.currentClueGiverId;
+  const team = eng.getPlayer(cluer).team;
+  eng.startTurn(cluer);
+  eng.skip(cluer);
+  eng.skip(cluer);
+  eng.gotIt(cluer);
+  ok(eng.getPlayer(cluer).skips[0] === 2, 'two skips tallied in round 0; a got-it does not count as a skip');
+
+  // Skips are bucketed by the active round; bump the round and skip again.
+  eng.currentRound = 1;
+  eng.skip(cluer);
+  ok(eng.getPlayer(cluer).skips[1] === 1, 'a skip in round 1 lands in its own bucket');
+  ok(eng.getPlayer(cluer).skips[0] === 2, 'the round-0 tally is left untouched');
+
+  // publicState surfaces per-round skips + a total for the stats screen.
+  const m = eng.publicState().teams[team].members.find(x => x.id === cluer);
+  ok(m && m.skips[0] === 2 && m.skips[1] === 1, 'public team view exposes per-round skips');
+  ok(m && m.skipTotal === 3, 'public team view exposes the skip total');
+
+  // Skips survive a host reload (serialize → restore).
+  const clone = new GameEngine();
+  clone.restore(eng.serialize());
+  ok(clone.getPlayer(cluer).skips[0] === 2 && clone.getPlayer(cluer).skips[1] === 1,
+    'per-round skips round-trip through serialize');
+
+  // Old snapshots lacking the field restore cleanly to an empty array.
+  const legacy = eng.serialize();
+  legacy.players.forEach(p => { delete p.skips; });
+  const legacyClone = new GameEngine();
+  legacyClone.restore(legacy);
+  ok(legacyClone.players.every(p => Array.isArray(p.skips) && p.skips.length === 0),
+    'legacy snapshot without skips restores to an empty array');
+
+  eng.playAgain(eng.hostId);
+  ok(eng.players.every(p => Array.isArray(p.skips) && p.skips.reduce((a, b) => a + b, 0) === 0),
+    'play-again clears skip counts');
+}
+
+// ===========================================================================
+section('Show guessed words — host can hide the recap from everyone but the clue-giver');
+{
+  // Default keeps the words visible to all (back-compat).
+  const shown = freshGame({ players: 4, numTeams: 2 });
+  ok(shown.config.showGuessedWords === true, 'showGuessedWords defaults to true');
+  submitAll(shown);
+  const c0 = shown.currentClueGiverId;
+  shown.startTurn(c0); shown.gotIt(c0); shown.gotIt(c0); shown.endTurnByTime();
+  const pubShown = shown.publicState();
+  ok(pubShown.lastTurnSummary.words.length === 2, 'public recap lists the words when visible');
+  ok(pubShown.lastTurnSummary.items.every(it => typeof it.text === 'string'),
+    'public items carry word text when visible');
+  ok(!pubShown.lastTurnSummary.hidden, 'public recap is not flagged hidden when visible');
+
+  // Turn it off → public recap is redacted, count preserved.
+  const hid = freshGame({ players: 4, numTeams: 2 });
+  hid.setConfig({ showGuessedWords: false });
+  ok(hid.config.showGuessedWords === false, 'host can turn showGuessedWords off');
+  submitAll(hid);
+  const cluer = hid.currentClueGiverId;
+  hid.startTurn(cluer);
+  const w1 = hid.privateStateFor(cluer).currentWord; hid.gotIt(cluer);
+  const w2 = hid.privateStateFor(cluer).currentWord; hid.gotIt(cluer);
+  hid.endTurnByTime();
+
+  const pub = hid.publicState();
+  ok(pub.lastTurnSummary.hidden === true, 'public recap is flagged hidden');
+  ok(pub.lastTurnSummary.scored === 2, 'public recap still reports the count when hidden');
+  ok(pub.lastTurnSummary.words.length === 0, 'public recap drops the word list when hidden');
+  ok(pub.lastTurnSummary.items.every(it => !('text' in it)), 'public items carry no text when hidden');
+  const pubStr = JSON.stringify(pub);
+  ok(!pubStr.includes(w1) && !pubStr.includes(w2), 'guessed word text never appears in public state when hidden');
+
+  // The clue-giver who just played still gets the full words privately.
+  const privCluer = hid.privateStateFor(cluer);
+  ok(Array.isArray(privCluer.summaryWords) && privCluer.summaryWords.length === 2,
+    'just-played clue-giver receives their words privately when hidden');
+  ok(privCluer.summaryItems.every(it => typeof it.text === 'string'),
+    'private summary items carry text for the clue-giver');
+  ok(privCluer.summaryWords.includes(w1) && privCluer.summaryWords.includes(w2),
+    'private words match what was guessed');
+
+  // Nobody else gets the private word list.
+  const other = hid.players.find(p => p.id !== cluer).id;
+  const privOther = hid.privateStateFor(other);
+  ok(!('summaryItems' in privOther) && !('summaryWords' in privOther),
+    'other players never receive the private word list');
+
+  // Review still works while hidden (engine logic is independent of visibility).
+  const reng = freshGame({ players: 4, numTeams: 2 });
+  reng.setConfig({ showGuessedWords: false, reviewGuesses: true });
+  submitAll(reng);
+  const rc = reng.currentClueGiverId;
+  const rTeam = reng.getPlayer(rc).team;
+  reng.startTurn(rc); reng.gotIt(rc); reng.gotIt(rc); reng.endTurnByTime();
+  const rp = reng.privateStateFor(rc);
+  ok(rp.canReviewGuesses && rp.summaryItems.length === 2,
+    'clue-giver can review their own words even when hidden from others');
+  ok(reng.reviewGuessedWord(rc, rp.summaryItems[0].id, false).ok &&
+    reng.scores[rTeam][0] === 1, 'unchecking still drops the point when words are hidden');
+
+  // The flag round-trips through serialize/restore.
+  const clone = new GameEngine();
+  clone.restore(hid.serialize());
+  ok(clone.config.showGuessedWords === false, 'showGuessedWords survives serialize/restore');
 }
 
 // ===========================================================================

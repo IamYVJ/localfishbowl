@@ -96,7 +96,7 @@ export class GameEngine {
     const team = this._smallestTeam();
     // `scores` tracks words this player got guessed AS the clue-giver, indexed
     // by round — the basis for the end-of-game per-player stats.
-    const player = { id, name: trimmed, online: true, team, words: [], submitted: false, scores: [] };
+    const player = { id, name: trimmed, online: true, team, words: [], submitted: false, scores: [], skips: [] };
     this.players.push(player);
     if (isHost) this.hostId = id;
     return { ok: true, player };
@@ -257,8 +257,11 @@ export class GameEngine {
     this.scores = this.players.length
       ? Array.from({ length: this.config.numTeams }, () => new Array(this.roundTypes.length).fill(0))
       : [];
-    // Fresh per-player stat rows, one cell per round.
-    this.players.forEach(p => { p.scores = new Array(this.roundTypes.length).fill(0); });
+    // Fresh per-player stat rows, one cell per round, for both points and skips.
+    this.players.forEach(p => {
+      p.scores = new Array(this.roundTypes.length).fill(0);
+      p.skips = new Array(this.roundTypes.length).fill(0);
+    });
     this.currentRound = 0;
     this.cluerPointers = new Array(this.config.numTeams).fill(0);
     this.currentTeamIndex = 0;
@@ -329,7 +332,13 @@ export class GameEngine {
     if (!this.config.allowSkip) return { ok: false, error: 'Skipping is turned off.' };
     if (id !== this.currentClueGiverId) return { ok: false, error: 'Only the clue-giver can skip.' };
     if (!this.currentWordId) return { ok: false, error: 'No word in play.' };
-    // Return the skipped word to the bowl, then draw the next one.
+    // Tally the skip against the clue-giver, by round (shown in the end-of-game
+    // stats), then return the word to the bowl and draw the next.
+    const cluer = this.getPlayer(this.currentClueGiverId);
+    if (cluer) {
+      const sk = cluer.skips || (cluer.skips = []);
+      sk[this.currentRound] = (sk[this.currentRound] || 0) + 1;
+    }
     this.remaining.push(this.currentWordId);
     this._drawNext();
     return { ok: true };
@@ -381,6 +390,29 @@ export class GameEngine {
     // bowl ends the round straight away, as before.
     const roundComplete = (reason === 'empty') && !this.config.reviewGuesses;
     this.phase = roundComplete ? PHASES.ROUND_BREAK : PHASES.TURN_SUMMARY;
+  }
+
+  /**
+   * The turn recap as broadcast to EVERYONE. When showGuessedWords is off we
+   * strip the actual word text (items[].text and words[]) so opponents can't
+   * learn the recurring bowl — the same words come back every round. The
+   * just-played clue-giver still gets the full text privately, via
+   * privateStateFor().summaryItems / summaryWords.
+   */
+  _publicSummary() {
+    const s = this.lastTurnSummary;
+    if (!s) return null;
+    if (this.config.showGuessedWords) return s;
+    return {
+      teamIndex: s.teamIndex,
+      reason: s.reason,
+      round: s.round,
+      cluerId: s.cluerId,
+      scored: s.scored,
+      hidden: true,
+      items: (s.items || []).map(it => ({ id: it.id, included: it.included })),
+      words: [],
+    };
   }
 
   /** Recompute the derived score/word fields after a review toggle. */
@@ -477,7 +509,10 @@ export class GameEngine {
     if (this.phase !== PHASES.GAMEOVER || !this.isTie) return;
     this.roundTypes.push('sudden');
     this.scores.forEach(s => s.push(0));
-    this.players.forEach(p => { (p.scores || (p.scores = [])).push(0); });
+    this.players.forEach(p => {
+      (p.scores || (p.scores = [])).push(0);
+      (p.skips || (p.skips = [])).push(0);
+    });
     this.currentRound = this.roundTypes.length - 1;
     this.suddenDeath = true;
     this.winners = null;
@@ -488,7 +523,7 @@ export class GameEngine {
   /** Re-lobby keeping players, teams and config; players re-enter new words. */
   playAgain(actorId) {
     if (actorId !== this.hostId) return;
-    const players = this.players.map(p => ({ ...p, words: [], submitted: false, scores: [] }));
+    const players = this.players.map(p => ({ ...p, words: [], submitted: false, scores: [], skips: [] }));
     const config = this.config;
     const hostId = this.hostId;
     this.reset();
@@ -558,6 +593,7 @@ export class GameEngine {
     this.players.forEach(p => {
       p.online = (p.id === this.hostId);
       if (!Array.isArray(p.scores)) p.scores = [];
+      if (!Array.isArray(p.skips)) p.skips = [];
     });
   }
 
@@ -583,6 +619,8 @@ export class GameEngine {
         id: p.id, name: p.name, online: p.online, isCluer: p.id === clueId,
         scores: (p.scores || []).slice(),
         total: (p.scores || []).reduce((a, b) => a + b, 0),
+        skips: (p.skips || []).slice(),
+        skipTotal: (p.skips || []).reduce((a, b) => a + b, 0),
       }));
       const rowScores = this.scores[t] || [];
       return {
@@ -642,7 +680,7 @@ export class GameEngine {
         ? Math.max(0, this.turnEndsAt - Date.now())
         : null,
 
-      lastTurnSummary: this.lastTurnSummary,
+      lastTurnSummary: this._publicSummary(),
       suddenDeath: this.suddenDeath,
     };
 
@@ -692,9 +730,15 @@ export class GameEngine {
 
     if (this.phase === PHASES.TURN_SUMMARY) {
       priv.canContinue = (id === this.hostId) || isClue;
+      const justCluer = !!this.lastTurnSummary && id === this.lastTurnSummary.cluerId;
       // Only the clue-giver who just played may fix their scored words.
-      priv.canReviewGuesses = !!this.config.reviewGuesses
-        && !!this.lastTurnSummary && id === this.lastTurnSummary.cluerId;
+      priv.canReviewGuesses = !!this.config.reviewGuesses && justCluer;
+      // The clue-giver who just played always sees their own words in full,
+      // even when showGuessedWords hides them from everyone else.
+      if (justCluer) {
+        priv.summaryItems = (this.lastTurnSummary.items || []).map(it => ({ ...it }));
+        priv.summaryWords = (this.lastTurnSummary.words || []).slice();
+      }
     }
 
     return priv;

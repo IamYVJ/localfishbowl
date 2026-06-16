@@ -560,6 +560,12 @@ body {
 .score-table td:first-child { text-align: left; font-family: var(--sans); display: flex; align-items: center; gap: 8px; }
 .score-table tr.current td { color: var(--text); }
 .score-table .tot-col { font-weight: 700; color: var(--accent); }
+/* Player stats cells read "guessed / skipped / seen": the guessed count leads,
+   the skipped and seen figures are muted so they read as context. */
+.section-label .label-note { text-transform: none; opacity: 0.75; font-weight: 400; }
+.stat-triple { white-space: nowrap; }
+.stat-table .stat-skip, .stat-table .stat-seen, .stat-table .stat-sep { color: var(--muted); }
+.stat-table .stat-sep { margin: 0 1px; opacity: 0.6; }
 
 /* --- Spinner ------------------------------------------------------------- */
 .spinner {
