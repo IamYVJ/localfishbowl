@@ -365,6 +365,60 @@ section('Reconnect mid-summary keeps clue-giver permissions');
 }
 
 // ===========================================================================
+section('Per-player stats — words credited to the clue-giver, by round');
+{
+  const eng = freshGame({ players: 4, numTeams: 2 });
+  submitAll(eng);
+  const cluer = eng.currentClueGiverId;
+  const team = eng.getPlayer(cluer).team;
+  eng.startTurn(cluer);
+  eng.gotIt(cluer);
+  eng.gotIt(cluer);
+  eng.endTurnByTime();
+  ok(eng.getPlayer(cluer).scores[0] === 2, 'clue-giver credited 2 words in round 0');
+  const other = eng.players.find(p => p.id !== cluer);
+  ok((other.scores[0] || 0) === 0, 'a player who has not clued has no points');
+
+  // publicState surfaces per-player scores + totals for the stats screen.
+  const pub = eng.publicState();
+  const m = pub.teams[team].members.find(x => x.id === cluer);
+  ok(m && m.scores[0] === 2 && m.total === 2, 'public team view exposes member scores + total');
+
+  // Each team total equals the sum of its players' totals.
+  let allMatch = true;
+  pub.teams.forEach(t => {
+    const sumPlayers = t.members.reduce((a, x) => a + (x.total || 0), 0);
+    if (sumPlayers !== t.total) allMatch = false;
+  });
+  ok(allMatch, "team totals equal the sum of their players' totals");
+}
+
+// ===========================================================================
+section('Per-player stats — review, play-again and serialize');
+{
+  const eng = freshGame({ players: 4, numTeams: 2 });
+  eng.setConfig({ reviewGuesses: true });
+  submitAll(eng);
+  const cluer = eng.currentClueGiverId;
+  eng.startTurn(cluer);
+  eng.gotIt(cluer);
+  eng.gotIt(cluer);
+  eng.endTurnByTime();
+  ok(eng.getPlayer(cluer).scores[0] === 2, 'two words credited before review');
+  eng.reviewGuessedWord(cluer, eng.lastTurnSummary.items[0].id, false);
+  ok(eng.getPlayer(cluer).scores[0] === 1, 'unchecking a word drops the clue-giver tally');
+
+  // Stats survive a host reload (serialize → restore).
+  const clone = new GameEngine();
+  clone.restore(eng.serialize());
+  ok(clone.getPlayer(cluer).scores[0] === 1, 'per-player stats round-trip through serialize');
+
+  eng.playAgain(eng.hostId);
+  ok(eng.players.every(p => (p.scores || []).reduce((a, b) => a + b, 0) === 0),
+    'play-again clears per-player stats');
+}
+
+// ===========================================================================
 section('Winner computation + sudden death');
 {
   const eng = freshGame({ players: 4, numTeams: 2 });

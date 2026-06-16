@@ -94,7 +94,9 @@ export class GameEngine {
     }
 
     const team = this._smallestTeam();
-    const player = { id, name: trimmed, online: true, team, words: [], submitted: false };
+    // `scores` tracks words this player got guessed AS the clue-giver, indexed
+    // by round — the basis for the end-of-game per-player stats.
+    const player = { id, name: trimmed, online: true, team, words: [], submitted: false, scores: [] };
     this.players.push(player);
     if (isHost) this.hostId = id;
     return { ok: true, player };
@@ -255,6 +257,8 @@ export class GameEngine {
     this.scores = this.players.length
       ? Array.from({ length: this.config.numTeams }, () => new Array(this.roundTypes.length).fill(0))
       : [];
+    // Fresh per-player stat rows, one cell per round.
+    this.players.forEach(p => { p.scores = new Array(this.roundTypes.length).fill(0); });
     this.currentRound = 0;
     this.cluerPointers = new Array(this.config.numTeams).fill(0);
     this.currentTeamIndex = 0;
@@ -310,6 +314,9 @@ export class GameEngine {
     if (!this.currentWordId) return { ok: false, error: 'No word in play.' };
 
     this.scores[this.currentTeamIndex][this.currentRound] += 1;
+    // Credit the word to the clue-giver who got it guessed (per-player stats).
+    const cluer = this.getPlayer(this.currentClueGiverId);
+    if (cluer) cluer.scores[this.currentRound] = (cluer.scores[this.currentRound] || 0) + 1;
     this.guessedThisTurn.push(this.currentWordId);
     this._drawNext();
     // Emptying the bowl ends the round immediately, even mid-turn.
@@ -404,15 +411,19 @@ export class GameEngine {
     if (item.included === want) return { ok: true }; // no-op
 
     const row = this.scores[s.teamIndex];
+    // Keep the clue-giver's per-player tally in lockstep with the team score.
+    const cluer = this.getPlayer(s.cluerId);
     if (want) {
       // Re-count it: restore the point and pull it back out of the bowl.
       row[s.round] = (row[s.round] || 0) + 1;
+      if (cluer) cluer.scores[s.round] = (cluer.scores[s.round] || 0) + 1;
       const i = this.remaining.indexOf(wordId);
       if (i !== -1) this.remaining.splice(i, 1);
       item.included = true;
     } else {
       // Discount it: drop the point and return the word to the bowl to replay.
       row[s.round] = Math.max(0, (row[s.round] || 0) - 1);
+      if (cluer) cluer.scores[s.round] = Math.max(0, (cluer.scores[s.round] || 0) - 1);
       if (!this.remaining.includes(wordId)) this.remaining.push(wordId);
       item.included = false;
     }
@@ -466,6 +477,7 @@ export class GameEngine {
     if (this.phase !== PHASES.GAMEOVER || !this.isTie) return;
     this.roundTypes.push('sudden');
     this.scores.forEach(s => s.push(0));
+    this.players.forEach(p => { (p.scores || (p.scores = [])).push(0); });
     this.currentRound = this.roundTypes.length - 1;
     this.suddenDeath = true;
     this.winners = null;
@@ -476,7 +488,7 @@ export class GameEngine {
   /** Re-lobby keeping players, teams and config; players re-enter new words. */
   playAgain(actorId) {
     if (actorId !== this.hostId) return;
-    const players = this.players.map(p => ({ ...p, words: [], submitted: false }));
+    const players = this.players.map(p => ({ ...p, words: [], submitted: false, scores: [] }));
     const config = this.config;
     const hostId = this.hostId;
     this.reset();
@@ -542,7 +554,11 @@ export class GameEngine {
       this.endTurnByTime();
     }
     // Everyone is offline until their connection re-establishes after reload.
-    this.players.forEach(p => { p.online = (p.id === this.hostId); });
+    // Guard older snapshots that predate per-player stats.
+    this.players.forEach(p => {
+      p.online = (p.id === this.hostId);
+      if (!Array.isArray(p.scores)) p.scores = [];
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -565,6 +581,8 @@ export class GameEngine {
       const theme = teamTheme(t);
       const members = this._teamMembers(t).map(p => ({
         id: p.id, name: p.name, online: p.online, isCluer: p.id === clueId,
+        scores: (p.scores || []).slice(),
+        total: (p.scores || []).reduce((a, b) => a + b, 0),
       }));
       const rowScores = this.scores[t] || [];
       return {

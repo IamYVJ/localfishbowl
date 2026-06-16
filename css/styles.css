@@ -167,7 +167,8 @@ body {
 .btn-secondary:hover { background: var(--accent-dim); }
 .btn-ghost { background: transparent; color: var(--muted); border-color: var(--border-soft); flex: 0 1 auto; min-width: 0; }
 .btn-ghost:hover { color: var(--text); border-color: var(--border); }
-.btn-skip { flex: 0 0 auto; min-width: 120px; }
+.btn-skip { background: var(--surface-2); color: var(--accent); border-color: var(--accent); }
+.btn-skip:hover { background: var(--accent-dim); }
 .btn-xl { min-height: 64px; font-size: 16px; letter-spacing: 0.08em; }
 .btn-disabled, .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-disabled:active { transform: none; }
@@ -780,7 +781,7 @@ body {
 .tv-code-big { font-family: var(--mono); font-weight: 700; letter-spacing: 0.2em; font-size: clamp(64px, 16vw, 200px); color: var(--accent); line-height: 1; }
 .tv-sub { font-size: clamp(15px, 1.8vw, 24px); color: var(--muted); max-width: 40ch; }
 .tv-center .team-cols { width: min(900px, 90%); }
-.tv-table { width: min(760px, 92%); }
+.tv-table { width: min(760px, 92%); display: flex; flex-direction: column; gap: clamp(6px, 1vw, 14px); }
 .tv-table .score-table { font-size: clamp(15px, 1.7vw, 22px); }
 .tv-table .score-table td, .tv-table .score-table th { padding: clamp(10px, 1.4vw, 16px) 8px; }
 

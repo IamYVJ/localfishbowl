@@ -525,7 +525,7 @@ function turnActiveScreen(app, intents) {
       el('div', { class: 'action-stack' },
         el('button', { class: 'btn btn-primary btn-xl', onclick: () => intents.gotIt() }, '✓ GOT IT'),
         priv.canSkip
-          ? el('button', { class: 'btn btn-secondary btn-skip', onclick: () => intents.skip() }, '↻ SKIP')
+          ? el('button', { class: 'btn btn-skip btn-xl', onclick: () => intents.skip() }, '↻ SKIP WORD')
           : null,
       ),
     ];
@@ -738,7 +738,12 @@ function gameOverScreen(app, intents) {
     );
   }
 
-  const children = [wordmark(intents), banner, fullScoreTable(pub, app)];
+  const children = [wordmark(intents), banner,
+    el('div', { class: 'section-label' }, 'TEAM SCORES'),
+    fullScoreTable(pub, app),
+    el('div', { class: 'section-label' }, 'PLAYER SCORES'),
+    playerStatsTable(pub, app),
+  ];
 
   if (isHost) {
     const row = [el('button', { class: 'btn btn-primary', onclick: () => intents.playAgain() }, '> PLAY AGAIN')];
@@ -777,6 +782,29 @@ function roundColHeader(pub, i) {
   const totalRounds = pub.teams[0] ? pub.teams[0].scores.length : 0;
   const hasSudden = pub.suddenDeath && i === totalRounds - 1;
   return hasSudden ? 'SD' : (base[i] || `R${i + 1}`);
+}
+
+// A per-player leaderboard: words each player got guessed as clue-giver, by
+// round, with totals. Sorted highest-first so the MVP sits on top; the local
+// player's row is highlighted.
+function playerStatsTable(pub, app) {
+  const rounds = pub.teams[0] ? pub.teams[0].scores.length : 0;
+  const rows = [];
+  pub.teams.forEach(t => (t.members || []).forEach(m =>
+    rows.push({ ...m, color: t.color, teamName: t.name })));
+  rows.sort((a, b) => (b.total || 0) - (a.total || 0) || a.name.localeCompare(b.name));
+
+  const head = el('tr', {}, el('th', {}, 'Player'),
+    ...Array.from({ length: rounds }, (_, i) => el('th', {}, roundColHeader(pub, i))),
+    el('th', { class: 'tot-col' }, 'Total'));
+  const body = rows.map(m => el('tr', { class: m.id === app.me.id ? 'current' : '' },
+    el('td', {},
+      el('span', { class: 'team-dot', style: `--team:${m.color}` }),
+      m.name + (m.id === app.me.id ? ' (you)' : '')),
+    ...Array.from({ length: rounds }, (_, i) => el('td', {}, String((m.scores || [])[i] || 0))),
+    el('td', { class: 'tot-col' }, String(m.total || 0)),
+  ));
+  return el('table', { class: 'score-table' }, el('thead', {}, head), el('tbody', {}, ...body));
 }
 
 // ---------------------------------------------------------------------------
@@ -964,7 +992,12 @@ function tvGameOver(pub, app) {
     el('div', { class: 'tv-sub' }, tie
       ? `${w ? w.total : 0} points each`
       : (w ? `${w.total} points` : '')),
-    el('div', { class: 'tv-table' }, fullScoreTable(pub, app)),
+    el('div', { class: 'tv-table' },
+      el('div', { class: 'section-label' }, 'TEAM SCORES'),
+      fullScoreTable(pub, app),
+      el('div', { class: 'section-label' }, 'PLAYER SCORES'),
+      playerStatsTable(pub, app),
+    ),
   );
 }
 
