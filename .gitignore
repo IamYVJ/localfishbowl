@@ -1,2 +1,7 @@
 /.claude
 /docs
+
+# Server (Phase 1+) — never commit installed deps or local env/secrets.
+node_modules/
+.env
+.env.*

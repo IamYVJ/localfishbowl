@@ -1,0 +1,17 @@
+{
+  "name": "fishbowl-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Authoritative WebSocket server for Fishbowl. Reuses the browser game engine (../js/state.js, ../js/rules.js) and acts as the host for every room. No stats, no public room list (code-only/private).",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "8.18.0"
+  }
+}

@@ -60,8 +60,13 @@ export class GameEngine {
   // Roster management
   // -------------------------------------------------------------------------
 
-  /** Seat a player, or let them reclaim their seat on reconnect (same name). */
-  addPlayer(id, name, { isHost = false } = {}) {
+  /**
+   * Seat a player, or let them reclaim their seat on reconnect (same name).
+   * `opts.clientId` is a stable per-device token (server mode): it is stored on
+   * the seat so the server can reclaim it by device id; P2P passes none and the
+   * behaviour is identical (it stays null). It is NEVER exposed in publicState.
+   */
+  addPlayer(id, name, { isHost = false, clientId = null } = {}) {
     const trimmed = (name || '').trim().slice(0, 16);
     if (!trimmed) return { ok: false, error: 'Name required.' };
 
@@ -81,6 +86,9 @@ export class GameEngine {
       const oldId = existing.id;
       existing.online = true;
       existing.id = id;
+      // Refresh the reconnect token if one was supplied (server mode); keep the
+      // prior token otherwise so a P2P reclaim never wipes a stored clientId.
+      if (clientId) existing.clientId = clientId;
       if (oldId !== id) this._remapPlayerId(oldId, id);
       if (isHost) this.hostId = id;
       return { ok: true, player: existing, reconnected: true, prevId: oldId };
@@ -96,7 +104,7 @@ export class GameEngine {
     const team = this._smallestTeam();
     // `scores` tracks words this player got guessed AS the clue-giver, indexed
     // by round — the basis for the end-of-game per-player stats.
-    const player = { id, name: trimmed, online: true, team, words: [], submitted: false, scores: [], skips: [] };
+    const player = { id, name: trimmed, online: true, team, words: [], submitted: false, scores: [], skips: [], clientId: clientId || null };
     this.players.push(player);
     if (isHost) this.hostId = id;
     return { ok: true, player };
@@ -594,6 +602,7 @@ export class GameEngine {
       p.online = (p.id === this.hostId);
       if (!Array.isArray(p.scores)) p.scores = [];
       if (!Array.isArray(p.skips)) p.skips = [];
+      if (p.clientId === undefined) p.clientId = null;
     });
   }
 

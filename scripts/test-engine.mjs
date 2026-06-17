@@ -535,6 +535,44 @@ section('Show guessed words — host can hide the recap from everyone but the cl
 }
 
 // ===========================================================================
+section('Client id — stable reconnect token for server mode (additive, P2P-safe)');
+{
+  const eng = new GameEngine();
+  // A seat created with a clientId stores it; one created without stays null.
+  eng.addPlayer('host', 'Host', { isHost: true, clientId: 'dev-host' });
+  eng.addPlayer('p1', 'Player1');
+  ok(eng.getPlayer('host').clientId === 'dev-host', 'addPlayer stores the clientId');
+  ok(eng.getPlayer('p1').clientId === null, 'a seat created without a clientId stays null');
+
+  // Reclaim by name with a fresh socket id refreshes the token when supplied.
+  const re = eng.addPlayer('host-2', 'Host', { clientId: 'dev-host-2' });
+  ok(re.ok && re.reconnected, 'name reclaim succeeds');
+  ok(eng.getPlayer('host-2').clientId === 'dev-host-2', 'reclaim refreshes the clientId when one is supplied');
+
+  // A reclaim that supplies no clientId must NOT wipe the stored one (P2P path).
+  eng.addPlayer('host-3', 'Host');
+  ok(eng.getPlayer('host-3').clientId === 'dev-host-2', 'reclaim without a clientId keeps the stored token');
+
+  // The reconnect token is a secret — it must never appear in publicState.
+  const pub = eng.publicState();
+  ok(pub.players.every(p => p.clientId === undefined), 'clientId is not exposed in publicState');
+  ok(!JSON.stringify(pub).includes('dev-host'), 'no clientId value leaks anywhere in publicState');
+
+  // It round-trips through serialize/restore.
+  const clone = new GameEngine();
+  clone.restore(eng.serialize());
+  ok(clone.getPlayer('host-3').clientId === 'dev-host-2', 'clientId round-trips through serialize/restore');
+
+  // Legacy snapshots that predate the field restore cleanly to null.
+  const legacy = eng.serialize();
+  legacy.players.forEach(p => { delete p.clientId; });
+  const legacyClone = new GameEngine();
+  legacyClone.restore(legacy);
+  ok(legacyClone.players.every(p => p.clientId === null),
+    'legacy snapshot without clientId restores to null');
+}
+
+// ===========================================================================
 section('Winner computation + sudden death');
 {
   const eng = freshGame({ players: 4, numTeams: 2 });
