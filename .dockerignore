@@ -1,0 +1,14 @@
+# Build context is the repo root. Keep the image lean and never ship local
+# dependency trees, secrets, or client-only assets the server doesn't import.
+**/node_modules
+**/.env
+**/.env.*
+.git
+.github
+.claude
+docs
+icons
+css
+sw.js
+manifest.webmanifest
+*.md
