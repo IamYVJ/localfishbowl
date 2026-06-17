@@ -66,6 +66,13 @@ function cleanName(s) {
   return (s == null ? '' : String(s)).replace(/\p{Cc}/gu, '').trim().slice(0, 24);
 }
 
+// Coerce a client-supplied reconnect token to a bounded string (or null). It is a
+// bearer credential for seat/owner reclaim, so we reject non-strings outright and
+// cap the length — a malformed or oversized token can never enter the room state.
+function cleanClientId(v) {
+  return typeof v === 'string' && v ? v.slice(0, 64) : null;
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -191,7 +198,7 @@ function onCreateRoom(ctx, ws, msg) {
   const id = randomUUID();
 
   ws._id = id;
-  ws._clientId = msg.clientId || null;
+  ws._clientId = cleanClientId(msg.clientId);
   ws._code = room.code;
   ws._spectator = asSpectator;
 
@@ -220,21 +227,31 @@ function onJoin(ctx, ws, msg) {
   }
 
   const name = cleanName(msg.name);
-  const clientId = msg.clientId || null;
+  const clientId = cleanClientId(msg.clientId);
   const e = room.engine;
 
-  // SECURITY (server mode): once the game has started a seat may hold private
-  // state (the current word, the recap words), so reclaim is allowed ONLY via
-  // the stable clientId (same device/browser). Block a name-only reclaim of an
-  // offline seat — otherwise anyone who can see a disconnected player's (public)
-  // name could seize their seat and read its private slice. In the lobby there
-  // is no private state yet, so name reclaim is fine. (The shared engine stays
-  // lenient for trusted P2P play; this guard is the server's stricter policy.)
+  // SECURITY (server mode): once the game has started a seat holds private state
+  // (the current word, the recap words, submitted words), so mid-game the ONLY
+  // legitimate join is reclaiming YOUR OWN seat via the stable clientId. We reject
+  // any join whose name collides with an existing seat — online OR offline —
+  // without a matching clientId. Blocking only offline seats is not enough: the
+  // shared engine's addPlayer() reclaims a seat by name even while it is online
+  // (P2P leniency for abrupt disconnects), so a name-only join would otherwise
+  // SEIZE a live player's seat — kicking them off and handing the attacker that
+  // seat's private slice (incl. the secret word if they are the active clue-giver).
+  // Player names are public in publicState, so the name alone must never be a key
+  // to a seat mid-game. In the lobby there is no private state, so name reclaim is
+  // fine. (The shared engine stays lenient for trusted P2P; this is server policy.)
   if (e.phase !== 'lobby') {
     const byClient = clientId ? e.players.find(p => p.clientId === clientId) : null;
-    if (!byClient && e.players.some(p => p.name.toLowerCase() === name.toLowerCase() && !p.online)) {
-      send(ws, { type: 'rejected', message: 'That player disconnected mid-game — rejoin from the same device/browser to reclaim the seat.' });
-      return;
+    if (!byClient) {
+      const clash = e.players.find(p => p.name.toLowerCase() === name.toLowerCase());
+      if (clash) {
+        send(ws, { type: 'rejected', message: clash.online
+          ? 'That name is taken in this game — pick a different name.'
+          : 'That player disconnected mid-game — rejoin from the same device/browser to reclaim the seat.' });
+        return;
+      }
     }
   }
 
@@ -277,7 +294,7 @@ function onSpectate(ctx, ws, msg) {
 
   const id = randomUUID();
   ws._id = id;
-  ws._clientId = msg.clientId || null;
+  ws._clientId = cleanClientId(msg.clientId);
   ws._code = code;
   ws._spectator = true;
   room.conns.set(id, ws);

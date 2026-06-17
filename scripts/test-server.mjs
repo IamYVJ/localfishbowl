@@ -268,6 +268,52 @@ section('Security — Part D regressions');
     ok(room.engine.getPlayer(real._id)?.online === true, 'reclaimed seat is back online');
   }
 
+  // --- mid-game: a LIVE player's seat cannot be seized by its public name ---
+  // (regression for the seat-hijack fix: name-only reclaim of an ONLINE seat must
+  // be refused, or an attacker who can read the public name would take over the
+  // clue-giver and receive the secret word.)
+  {
+    const ctx = makeCtx();
+    const { owner, code, seats } = seatGame(ctx, { players: 4 });
+    const room = ctx.manager.get(code);
+    room.engine.players.forEach((p, i) => { p.team = i % 2; });
+    startToPlay(ctx, code, owner, seats, true);
+
+    // Drive to an active turn so the clue-giver's seat holds the secret word.
+    const clue = clueWsFor(seats, room);
+    tx(ctx, clue, { type: 'startTurn' });
+    ok(room.engine.phase === 'turnActive', 'a turn is active (clue-giver holds the word)');
+    const victimName = room.engine.getPlayer(clue._id).name;
+    const victimId = clue._id;
+    const secret = privOf(clue).currentWord;
+    ok(typeof secret === 'string' && secret, 'clue-giver privately holds the current word');
+
+    // Attacker rejoins with the clue-giver's PUBLIC name and a foreign clientId.
+    const attacker = makeWS();
+    tx(ctx, attacker, { type: 'join', code, name: victimName, clientId: 'cid-ATTACKER' });
+    ok(lastMsg(attacker, 'rejected'), 'name-only reclaim of a LIVE seat is rejected mid-game');
+    ok(attacker._id === null, 'attacker never got a seat id');
+    ok(privOf(attacker) === null, 'attacker received no state (and so no secret word)');
+    // The live victim keeps their seat — same id, still online, socket undisplaced.
+    ok(room.engine.getPlayer(victimId)?.online === true, 'victim seat untouched and still online');
+    ok(room.conns.get(victimId) === clue, 'victim socket was not displaced');
+  }
+
+  // --- clientId is coerced to a bounded string (non-string/oversized dropped) ---
+  {
+    const ctx = makeCtx();
+    const owner = makeWS();
+    tx(ctx, owner, { type: 'createRoom', name: 'Owner', clientId: 'z'.repeat(500) });
+    const code = lastMsg(owner, 'welcome').code;
+    const room = ctx.manager.get(code);
+    ok(typeof room.ownerClientId === 'string' && room.ownerClientId.length === 64,
+      `oversized clientId clamped to 64 chars (len ${room.ownerClientId?.length})`);
+
+    const p = makeWS();
+    tx(ctx, p, { type: 'join', code, name: 'P1', clientId: { evil: true } });
+    ok(room.engine.getPlayer(p._id)?.clientId === null, 'a non-string clientId is dropped to null');
+  }
+
   // --- one room per connection ---
   {
     const ctx = makeCtx();

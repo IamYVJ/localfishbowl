@@ -42,6 +42,7 @@ const MAX_PAYLOAD = Number(process.env.MAX_PAYLOAD_BYTES) || 64 * 1024; // 64 Ki
 const MAX_CONNS = Number(process.env.MAX_CONNS) || 200;                 // global backstop
 const MSG_RATE = Number(process.env.MSG_RATE_PER_SEC) || 20;            // sustained msgs/sec/conn
 const MSG_BURST = Number(process.env.MSG_BURST) || 40;                  // bucket size
+const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS) || 30 * 1000;     // ping/terminate cadence
 
 const manager = new RoomManager({ maxRooms: MAX_ROOMS });
 const ctx = { manager, maxRooms: MAX_ROOMS };
@@ -104,6 +105,14 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws) => {
+  // Liveness: a half-open TCP connection (client vanishes without a close frame —
+  // common behind the Tailscale Funnel / Caddy / mobile networks) would otherwise
+  // never fire 'close', leaking connection slots (toward MAX_CONNS) and pinning
+  // rooms open (hasOpenConns sees a dead socket as OPEN). The heartbeat below pings
+  // and terminates anything that didn't pong since the last sweep.
+  ws._alive = true;
+  ws.on('pong', () => { ws._alive = true; });
+
   ws.on('message', (data) => {
     // Per-connection token-bucket rate limit — drop floods rather than amplify
     // them into a broadcast to every socket in the room.
@@ -130,6 +139,18 @@ wss.on('connection', (ws) => {
 server.listen(PORT, () => {
   console.log(`[fishbowl-server] listening on :${PORT} prod=${IS_PROD} origins=${ALLOWED_ORIGINS.join('|')}`);
 });
+
+// Heartbeat: terminate any socket that didn't pong since the previous tick, then
+// ping the survivors. terminate() fires 'close', so the normal cleanup path runs
+// (conn counts decremented, seat marked offline) and the idle sweep can reclaim
+// the room. unref so it never keeps the process alive on its own.
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws._alive === false) { try { ws.terminate(); } catch (_) {} continue; }
+    ws._alive = false;
+    try { ws.ping(); } catch (_) {}
+  }
+}, HEARTBEAT_MS).unref();
 
 // Periodic idle-room sweep (unref so it never keeps the process alive).
 setInterval(() => manager.sweep(), 60 * 1000).unref();
