@@ -134,6 +134,55 @@ export function joinHost(code, handlers = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// SERVER side (optional authoritative server) — a thin native-WebSocket
+// transport with the SAME handle shape as joinHost():
+//     { send(msg), isOpen(), destroy() }
+// and the same client-side callbacks { onOpen(), onData(msg), onClose(), onError(err) }.
+//
+// In server mode the SERVER runs the engine and IS the host; this client only
+// ships intents over the wire and renders the state it is sent. Used only when
+// js/config.js sets SERVER_URL (otherwise the app is byte-for-byte pure P2P).
+//
+// NOTE: onError receives a DOM Event here (not a PeerJS error object), so the
+// caller must NOT route it through describePeerError — use a generic message.
+// ---------------------------------------------------------------------------
+export function serverTransport(url, handlers = {}) {
+  let ws;
+  // Once destroy() runs, suppress every further callback. The socket's close
+  // event fires ASYNCHRONOUSLY, so without this a transport we tore down (e.g.
+  // when falling back to P2P after the server rejects a join) would still fire
+  // onClose and clobber the new transport's screen.
+  let dead = false;
+  try {
+    ws = new WebSocket(url);
+  } catch (err) {
+    // The WebSocket constructor throws synchronously on a malformed URL — surface
+    // it asynchronously so callers always observe it via the onError callback.
+    setTimeout(() => { if (!dead) handlers.onError && handlers.onError(err); }, 0);
+    return { send() {}, isOpen() { return false; }, destroy() { dead = true; } };
+  }
+
+  ws.onopen    = () => { if (!dead) handlers.onOpen && handlers.onOpen(); };
+  ws.onmessage = (ev) => {
+    if (dead) return;
+    const msg = safeParse(ev.data);
+    if (msg) handlers.onData && handlers.onData(msg);
+  };
+  ws.onclose   = () => { if (!dead) handlers.onClose && handlers.onClose(); };
+  ws.onerror   = (err) => { if (!dead) handlers.onError && handlers.onError(err); };
+
+  return {
+    send(msg) {
+      if (!dead && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify(msg)); } catch (_) { /* connection torn down */ }
+      }
+    },
+    isOpen() { return !dead && ws.readyState === WebSocket.OPEN; },
+    destroy() { dead = true; try { ws.close(); } catch (_) {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // DISCOVERY side — find games on the broker without typing a code.
 //
 //   IMPORTANT: peer.listAllPeers() only returns data when the signaling broker

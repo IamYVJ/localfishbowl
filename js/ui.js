@@ -61,6 +61,16 @@ function homeScreen(app, intents) {
     oninput: (e) => intents.setName(e.target.value),
   });
 
+  // The online-host control + its explainer appear ONLY when the boot health
+  // check found a reachable server (app.serverUp). With no server configured (or
+  // an unreachable one) the home screen is byte-for-byte the original pure-P2P
+  // build — same labels, same fine print, no extra button.
+  const online = app.serverUp;
+  const onlineRow = online
+    ? el('div', { class: 'btn-row' },
+        el('button', { class: 'btn btn-online', onclick: () => intents.hostOnline() }, '☁ HOST ONLINE'))
+    : null;
+
   return shell(
     wordmark(intents),
     el('h1', { class: 'hero' }, 'Fishbowl'),
@@ -70,11 +80,16 @@ function homeScreen(app, intents) {
       ', then describe, act, and one-word your way to victory — same words, three ways.'),
     el('div', { class: 'field-group' }, nameInput),
     el('div', { class: 'btn-row' },
-      el('button', { class: 'btn btn-primary', onclick: () => intents.host() }, '+ HOST GAME'),
+      el('button', { class: 'btn btn-primary', onclick: () => intents.host() }, online ? '+ HOST ON WI-FI' : '+ HOST GAME'),
       el('button', { class: 'btn btn-secondary', onclick: () => intents.gotoJoin() }, '▷ JOIN GAME'),
     ),
+    onlineRow,
     el('button', { class: 'link-btn', onclick: () => intents.toggleRules() }, 'How to play'),
-    el('p', { class: 'fine' }, 'Plays peer-to-peer in your browser on the same Wi-Fi. No accounts, no servers.'),
+    online
+      ? el('p', { class: 'fine' },
+          'Host ', el('span', { class: 'accent' }, 'on your Wi-Fi'), ' (peer-to-peer) — or ',
+          el('span', { class: 'accent' }, 'online'), ', so anyone can join from anywhere with a code. No accounts.')
+      : el('p', { class: 'fine' }, 'Plays peer-to-peer in your browser on the same Wi-Fi. No accounts, no servers.'),
   );
 }
 

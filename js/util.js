@@ -57,6 +57,29 @@ export function saveName(n) { try { localStorage.setItem(NAME_KEY, n); } catch (
 export function loadCode()  { try { return localStorage.getItem(CODE_KEY) || ''; } catch (_) { return ''; } }
 export function saveCode(c) { try { localStorage.setItem(CODE_KEY, c); } catch (_) {} }
 
+// --- Stable per-device client id (SERVER mode only) ------------------------
+// A durable random token persisted in localStorage. In server mode it is the
+// bearer credential the server uses to re-attach a reconnecting socket to its
+// existing seat and to restore room ownership — WITHOUT trusting the public
+// display name (see server/session.js onJoin). Pure-P2P play never reads it.
+// Falls back to a volatile per-load id if storage or crypto is unavailable.
+const CLIENT_ID_KEY = 'localfishbowl.clientId';
+
+function randomId() {
+  try { if (crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (_) {}
+  return 'c-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+export function loadClientId() {
+  try {
+    let id = localStorage.getItem(CLIENT_ID_KEY);
+    if (!id) { id = randomId(); localStorage.setItem(CLIENT_ID_KEY, id); }
+    return id;
+  } catch (_) {
+    return randomId();
+  }
+}
+
 // --- Session resume (reload / rejoin returns to the same game) -------------
 // We remember whether this device was hosting or joining, the room code, and
 // the player name, plus (for a host) a snapshot of the authoritative engine so

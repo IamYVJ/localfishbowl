@@ -169,6 +169,8 @@ body {
 .btn-ghost:hover { color: var(--text); border-color: var(--border); }
 .btn-skip { background: var(--surface-2); color: var(--accent); border-color: var(--accent); }
 .btn-skip:hover { background: var(--accent-dim); }
+.btn-online { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+.btn-online:hover { background: rgba(56, 214, 240, 0.2); }
 .btn-xl { min-height: 64px; font-size: 16px; letter-spacing: 0.08em; }
 .btn-disabled, .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-disabled:active { transform: none; }

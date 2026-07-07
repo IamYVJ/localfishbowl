@@ -9,13 +9,14 @@
 // ============================================================================
 
 import { GameEngine } from './state.js';
-import { createHost, joinHost, createDiscovery, describePeerError, peerIdForCode } from './net.js';
+import { createHost, joinHost, createDiscovery, serverTransport, describePeerError, peerIdForCode } from './net.js';
 import { render, updateTimerNodes } from './ui.js';
 import {
   generateRoomCode, normalizeCode, copyText,
-  loadName, saveName, loadCode, saveCode,
+  loadName, saveName, loadCode, saveCode, loadClientId,
   saveSession, loadSession, clearSession, saveEngineSnapshot, loadEngineSnapshot,
 } from './util.js';
+import { SERVER_URL, SERVER_HEALTH } from './config.js';
 
 const root = document.getElementById('app');
 
@@ -24,13 +25,22 @@ const root = document.getElementById('app');
 // ---------------------------------------------------------------------------
 const app = {
   screen: 'home',                 // home | join | connecting | game | error | hostleft
-  me: { id: null, name: loadName(), isHost: false, isSpectator: false },
+  // me.isHost doubles as "I am the controller": the P2P host OR the server room
+  // owner. me.clientId is the stable seat/owner-reclaim token (server mode only).
+  me: { id: null, name: loadName(), isHost: false, isSpectator: false, clientId: loadClientId() },
   code: loadCode(),
   pub: null,
   priv: null,
   error: '',
   copied: false,
   showRules: false,
+
+  // Transport. 'p2p' = PeerJS/LAN (the original build); 'server' = authoritative
+  // WebSocket server. serverUp is set by the boot health check ONLY when a server
+  // is configured AND reachable — it gates every piece of server-mode UI, so with
+  // no server (or an unreachable one) the app stays byte-for-byte pure P2P.
+  mode: 'p2p',
+  serverUp: false,
 
   // Local-network game discovery (Join screen).
   discovered: [],
@@ -277,7 +287,90 @@ function resumeHosting(code, snapshot, name) {
 }
 
 // ---------------------------------------------------------------------------
-// Join an existing game.
+// SERVER MODE — host / join / spectate against the authoritative WebSocket
+// server. The server runs the engine and IS the host; this client (even the
+// room owner) only ships intents over the wire and renders what it receives.
+//
+// Server mode is NEVER auto-resumed across reloads in v1 — every server attempt
+// calls clearSession(), and resumeSession() only ever restores a P2P session.
+// ---------------------------------------------------------------------------
+
+// welcome/state/error handling is identical across the three server flows; the
+// callers differ only in failure policy, supplied via opts:
+//   onRejected(msg) — server explicitly refused this attempt (bad code/name/full).
+//   onFail()        — the connection failed/closed BEFORE we entered a game (can't
+//                     reach the server, 403 from a non-allow-listed origin, or a
+//                     drop mid-handshake). join/spectate pass onFail to fall back
+//                     to P2P; "Host online" omits it and surfaces an error.
+// A drop AFTER we're in a game ('game' screen) is always a real disconnect.
+function serverHandlers({ onRejected, onFail }) {
+  const fail = (defaultMsg) => {
+    if (app.screen === 'game') { app.screen = 'hostleft'; draw(); return; }
+    if (onFail) { onFail(); return; }
+    app.screen = 'error'; app.error = defaultMsg; draw();
+  };
+  return {
+    onData: (msg) => {
+      switch (msg.type) {
+        case 'welcome':
+          app.me.id = msg.playerId;
+          if (msg.code) { app.code = msg.code; saveCode(app.code); }
+          app.me.isHost = !!msg.owner;          // owner == the controller in server mode
+          app.me.isSpectator = !!msg.spectator;
+          break;
+        case 'state':
+          app.pub = msg.pub; app.priv = msg.priv;
+          syncClock(app.pub);
+          app.screen = 'game';
+          draw();
+          break;
+        case 'rejected':
+          onRejected(msg);
+          break;
+        case 'error':
+          app.error = msg.message; draw();
+          break;
+        default: break;
+      }
+    },
+    onClose: () => fail('The connection to the game server closed.'),
+    onError: () => { if (!net || !net.isOpen()) fail("Couldn't reach the game server. Check your connection and try again."); },
+  };
+}
+
+// Host a game ON THE SERVER (the "Host online" home button). No P2P fallback —
+// the user explicitly chose online, so a failure surfaces as an error.
+function hostOnServer() {
+  const name = (app.me.name || '').trim();
+  if (!name) { app.screen = 'home'; app.error = 'Enter a name first.'; draw(); return; }
+
+  stopDiscovery();
+  app.me.name = name; saveName(name);
+  app.me.isHost = false;          // becomes true on welcome.owner
+  app.me.isSpectator = false;
+  app.mode = 'server';
+  app.error = '';
+  app.screen = 'connecting';
+  clearSession();                 // server mode is not resumed in v1
+  draw();
+
+  net = serverTransport(SERVER_URL, {
+    ...serverHandlers({
+      onRejected: (msg) => {
+        clearSession(); teardownNet();
+        app.mode = 'p2p';
+        app.screen = 'home'; app.error = msg.message; draw();
+      },
+    }),
+    onOpen: () => net.send({ type: 'createRoom', name, clientId: app.me.clientId }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Join an existing game. Server-first when a server is reachable (one code can
+// reach a server-hosted OR a P2P-hosted game): we try the server, and if it has
+// no such room we fall back to a P2P join for the same code. With no server the
+// path is byte-for-byte the original P2P join.
 // ---------------------------------------------------------------------------
 function startJoining(rawCode, rawName) {
   const name = (rawName || '').trim();
@@ -289,10 +382,40 @@ function startJoining(rawCode, rawName) {
   app.me.name = name; saveName(name);
   app.code = code; saveCode(code);
   app.me.isHost = false;
+  app.me.isSpectator = false;
   app.error = '';
   app.screen = 'connecting';
-  saveSession({ mode: 'join', code, name });
   draw();
+
+  if (app.serverUp) {
+    app.mode = 'server';
+    clearSession();
+    net = serverTransport(SERVER_URL, {
+      ...serverHandlers({
+        onRejected: (msg) => {
+          // No such room on the server → maybe it's a P2P game with this code.
+          if (/no game/i.test(msg.message || '')) { teardownNet(); joinViaP2P(code, name); return; }
+          clearSession(); teardownNet();
+          app.mode = 'p2p';
+          app.screen = 'join'; app.error = msg.message; startDiscovery(); draw();
+        },
+        // Can't reach the server (offline, 403 origin, drop mid-handshake) →
+        // try the same code as a P2P game before giving up.
+        onFail: () => { teardownNet(); joinViaP2P(code, name); },
+      }),
+      onOpen: () => net.send({ type: 'join', code, name, clientId: app.me.clientId }),
+    });
+    return;
+  }
+
+  joinViaP2P(code, name);
+}
+
+// The original PeerJS join — unchanged behaviour, extracted so the server path
+// can fall back to it. Persists a P2P 'join' session for reload-resume.
+function joinViaP2P(code, name) {
+  app.mode = 'p2p';
+  saveSession({ mode: 'join', code, name });
 
   net = joinHost(code, {
     onOpen: () => net.send({ type: 'join', name }),
@@ -330,9 +453,9 @@ function startJoining(rawCode, rawName) {
 
 // ---------------------------------------------------------------------------
 // Spectate an existing game — a read-only TV/big-screen view. A spectator is
-// NOT a player: it never enters the engine, sends no intents, and the host
-// only ever sends it public state (priv === null), so the secret word can
-// never reach it.
+// NOT a player: it never enters the engine, sends no intents, and the host (P2P
+// or server) only ever sends it public state (priv === null), so the secret
+// word can never reach it. Server-first with the same P2P fallback as joining.
 // ---------------------------------------------------------------------------
 function startSpectating(rawCode) {
   const code = normalizeCode(rawCode);
@@ -346,8 +469,33 @@ function startSpectating(rawCode) {
   app.me.name = app.me.name || 'Spectator';
   app.error = '';
   app.screen = 'connecting';
-  saveSession({ mode: 'spectate', code });
   draw();
+
+  if (app.serverUp) {
+    app.mode = 'server';
+    clearSession();
+    net = serverTransport(SERVER_URL, {
+      ...serverHandlers({
+        onRejected: (msg) => {
+          if (/no game/i.test(msg.message || '')) { teardownNet(); spectateViaP2P(code); return; }
+          clearSession(); teardownNet();
+          app.mode = 'p2p';
+          app.screen = 'join'; app.error = msg.message; startDiscovery(); draw();
+        },
+        onFail: () => { teardownNet(); spectateViaP2P(code); },
+      }),
+      onOpen: () => net.send({ type: 'spectate', code, clientId: app.me.clientId }),
+    });
+    return;
+  }
+
+  spectateViaP2P(code);
+}
+
+// The original PeerJS spectate — unchanged behaviour, extracted for fallback.
+function spectateViaP2P(code) {
+  app.mode = 'p2p';
+  saveSession({ mode: 'spectate', code });
 
   net = joinHost(code, {
     onOpen: () => net.send({ type: 'spectate' }),
@@ -434,14 +582,28 @@ function teardownNet() {
 // drive the engine directly.
 // ---------------------------------------------------------------------------
 function sendIntent(msg) {
+  // SERVER mode: everyone (owner included) ships intents over the wire — the
+  // server runs the engine. P2P mode: the host applies locally; clients send.
+  if (app.mode === 'server') { if (net) net.send(msg); return; }
   if (app.me.isHost) handleIntent(app.me.id, msg);
   else if (net) net.send(msg);
 }
 
-function hostOnly(fn) {
+// Owner/host flow controls. In P2P the host drives the LOCAL engine directly and
+// re-broadcasts via hostSync(). In SERVER mode the owner has no local engine —
+// the control is sent over the wire and the server gates it on ownership and
+// broadcasts the result. Either way it is a no-op unless this client is the
+// room's controller (app.me.isHost). `wireMsg` may be a plain object or a
+// function of the same args, producing the server message to send.
+function ownerControl(p2pFn, wireMsg) {
   return (...args) => {
-    if (!app.me.isHost || !engine) return;
-    fn(...args);
+    if (!app.me.isHost) return;
+    if (app.mode === 'server') {
+      if (net) net.send(typeof wireMsg === 'function' ? wireMsg(...args) : wireMsg);
+      return;
+    }
+    if (!engine) return;
+    p2pFn(...args);
     hostSync();
   };
 }
@@ -457,12 +619,14 @@ const intents = {
     app.screen = 'home';
     app.pub = null; app.priv = null; app.error = '';
     app.me.isHost = false; app.me.isSpectator = false; app.me.id = null;
+    app.mode = 'p2p';
     app.wordDrafts = null;
     draw();
   },
   toggleRules: () => { app.showRules = !app.showRules; draw(); },
 
   host: () => startHosting(),
+  hostOnline: () => hostOnServer(),
   join: (code, name) => startJoining(code, name),
   spectate: (code) => startSpectating(code),
 
@@ -474,25 +638,27 @@ const intents = {
     if (ok) setTimeout(() => { app.copied = false; draw(); }, 1500);
   },
 
-  // --- Host lobby controls ---
-  setConfig: hostOnly((patch) => engine.setConfig(patch)),
-  setPlayerTeam: hostOnly((playerId, team) => engine.setPlayerTeam(playerId, team)),
-  autoBalance: hostOnly(() => engine.autoBalance()),
-  startSubmission: hostOnly(() => {
+  // --- Host/owner lobby controls (P2P: local engine · server: over the wire) ---
+  setConfig: ownerControl((patch) => engine.setConfig(patch),
+    (patch) => ({ type: 'setConfig', patch })),
+  setPlayerTeam: ownerControl((playerId, team) => engine.setPlayerTeam(playerId, team),
+    (playerId, team) => ({ type: 'setPlayerTeam', playerId, team })),
+  autoBalance: ownerControl(() => engine.autoBalance(), { type: 'autoBalance' }),
+  startSubmission: ownerControl(() => {
     const r = engine.startSubmission(app.me.id);
     if (!r.ok) app.error = r.error;
-  }),
-  beginPlay: hostOnly(() => {
+  }, { type: 'startSubmission' }),
+  beginPlay: ownerControl(() => {
     const r = engine.beginPlay(app.me.id);
     if (!r.ok) app.error = r.error;
-  }),
+  }, { type: 'beginPlay' }),
 
-  // --- Host flow controls ---
-  skipClueGiver: hostOnly(() => engine.skipClueGiver(app.me.id)),
-  nextRound: hostOnly(() => engine.nextRound(app.me.id)),
-  finishGame: hostOnly(() => engine.finishGame(app.me.id)),
-  suddenDeath: hostOnly(() => engine.startSuddenDeath(app.me.id)),
-  playAgain: hostOnly(() => engine.playAgain(app.me.id)),
+  // --- Host/owner flow controls ---
+  skipClueGiver: ownerControl(() => engine.skipClueGiver(app.me.id), { type: 'skipClueGiver' }),
+  nextRound: ownerControl(() => engine.nextRound(app.me.id), { type: 'nextRound' }),
+  finishGame: ownerControl(() => engine.finishGame(app.me.id), { type: 'finishGame' }),
+  suddenDeath: ownerControl(() => engine.startSuddenDeath(app.me.id), { type: 'suddenDeath' }),
+  playAgain: ownerControl(() => engine.playAgain(app.me.id), { type: 'playAgain' }),
 
   // --- Word submission (per player) ---
   setWordDraft: (i, value) => { if (app.wordDrafts) app.wordDrafts[i] = value; },
@@ -534,7 +700,33 @@ function resumeSession() {
   return false;
 }
 
+// Best-effort liveness probe for the optional authoritative server. Runs only
+// when a server is configured (config.js). On success it flips app.serverUp,
+// which is the SINGLE gate for every piece of server-mode UI — so a missing or
+// unreachable server leaves the app byte-for-byte pure P2P. Short timeout; never
+// blocks boot. resumeSession() runs FIRST (below) so it sees serverUp === false
+// and only ever restores a P2P session.
+function checkServerHealth() {
+  if (!SERVER_URL || !SERVER_HEALTH) return;   // server mode disabled
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 1500);
+  fetch(SERVER_HEALTH, { signal: ctrl.signal, cache: 'no-store' })
+    .then((res) => { if (!res.ok) throw new Error('health'); return res.json(); })
+    .then(() => {
+      app.serverUp = true;
+      if (app.screen === 'home') draw();        // reveal the "Host online" option
+    })
+    .catch(() => { /* unreachable — stay in the pure-P2P UI */ })
+    .finally(() => clearTimeout(timer));
+}
+
+// ---------------------------------------------------------------------------
+// Boot — resume the previous (always P2P) session if there is one, THEN probe
+// the server. The synchronous resume sees serverUp === false, guaranteeing it
+// never takes a server path.
+// ---------------------------------------------------------------------------
 if (!resumeSession()) draw();
+checkServerHealth();
 
 // Service worker (relative path so it works under a GitHub Pages subpath).
 if ('serviceWorker' in navigator) {
