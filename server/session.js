@@ -243,15 +243,18 @@ function onJoin(ctx, ws, msg) {
   // to a seat mid-game. In the lobby there is no private state, so name reclaim is
   // fine. (The shared engine stays lenient for trusted P2P; this is server policy.)
   if (e.phase !== 'lobby') {
-    const byClient = clientId ? e.players.find(p => p.clientId === clientId) : null;
-    if (!byClient) {
-      const clash = e.players.find(p => p.name.toLowerCase() === name.toLowerCase());
-      if (clash) {
-        send(ws, { type: 'rejected', message: clash.online
-          ? 'That name is taken in this game — pick a different name.'
-          : 'That player disconnected mid-game — rejoin from the same device/browser to reclaim the seat.' });
-        return;
-      }
+    // A name matching an existing seat may be reused ONLY by that seat's original
+    // owner, proven by a clientId equal to THAT seat's clientId. Merely holding
+    // some OTHER seat must not wave the join through: the shared engine reclaims a
+    // seat by name, so a seated participant could otherwise present a victim's
+    // public name together with their own clientId and seize the victim's seat
+    // (and its private slice — the secret word if the victim is the clue-giver).
+    const clash = e.players.find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (clash && !(clientId && clash.clientId === clientId)) {
+      send(ws, { type: 'rejected', message: clash.online
+        ? 'That name is taken in this game — pick a different name.'
+        : 'That player disconnected mid-game — rejoin from the same device/browser to reclaim the seat.' });
+      return;
     }
   }
 

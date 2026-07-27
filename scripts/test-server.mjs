@@ -299,6 +299,45 @@ section('Security — Part D regressions');
     ok(room.conns.get(victimId) === clue, 'victim socket was not displaced');
   }
 
+  // --- mid-game: a SEATED participant cannot seize another player's seat via its
+  // public name, even presenting their OWN valid clientId. Regression for the
+  // `byClient` short-circuit: owning *some* seat must not bypass the name-clash
+  // guard, since the engine reclaims by name and would hand over the victim's
+  // private slice (the secret word when the victim is the clue-giver). The other
+  // hijack tests use a clientId matching no seat, so they miss this path.
+  {
+    const ctx = makeCtx();
+    const { owner, code, seats } = seatGame(ctx, { players: 4 });
+    const room = ctx.manager.get(code);
+    room.engine.players.forEach((p, i) => { p.team = i % 2; });
+    startToPlay(ctx, code, owner, seats, true);
+
+    // Drive to an active turn so the clue-giver's seat holds the secret word.
+    const clue = clueWsFor(seats, room);
+    tx(ctx, clue, { type: 'startTurn' });
+    ok(room.engine.phase === 'turnActive', 'a turn is active (clue-giver holds the word)');
+    const victimId = clue._id;
+    const victimName = room.engine.getPlayer(victimId).name;
+    const victimClientId = room.engine.getPlayer(victimId).clientId;
+
+    // Attacker is a DIFFERENT seated player who legitimately owns a seat via their
+    // own clientId — exactly what the old `byClient` check waved straight through.
+    const attacker = seats.find(w => w !== clue && w !== owner);
+    const attackerId = attacker._id;
+    const attackerClientId = attacker._clientId;
+    ok(attackerClientId && attackerClientId !== victimClientId, 'attacker owns a real, different seat');
+
+    tx(ctx, attacker, { type: 'join', code, name: victimName, clientId: attackerClientId });
+    ok(lastMsg(attacker, 'rejected'), 'a seated player cannot grab another seat by its public name');
+    // The clue-giver's seat is fully intact.
+    ok(room.engine.getPlayer(victimId)?.online === true, 'clue-giver seat still online');
+    ok(room.engine.getPlayer(victimId)?.clientId === victimClientId, 'clue-giver clientId not overwritten');
+    ok(room.conns.get(victimId) === clue, 'clue-giver socket not displaced');
+    // The attacker still holds ONLY their own original seat.
+    ok(attacker._id === attackerId, 'attacker keeps only its own seat id');
+    ok(room.conns.get(attackerId) === attacker, 'attacker socket still mapped to its own seat');
+  }
+
   // --- clientId is coerced to a bounded string (non-string/oversized dropped) ---
   {
     const ctx = makeCtx();

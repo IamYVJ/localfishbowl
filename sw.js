@@ -12,7 +12,7 @@
 // ============================================================================
 
 // Bump this version to invalidate old caches on the next activate.
-const CACHE = 'localfishbowl-v1';
+const CACHE = 'localfishbowl-v2';
 
 // Core app shell (same-origin). Relative to the SW's scope.
 const SHELL = [

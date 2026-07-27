@@ -106,7 +106,10 @@ function joinScreen(app, intents) {
     class: 'field field-code', type: 'text', maxlength: '4', placeholder: 'CODE',
     value: app.code || '', autocapitalize: 'characters', autocomplete: 'off',
     'aria-label': 'Room code', 'data-focus': 'code',
-    oninput: (e) => { e.target.value = e.target.value.toUpperCase(); },
+    // Uppercase in place for instant feedback AND mirror into app state, so a
+    // discovery-driven draw() (every ~3.5s) re-renders with the typed code
+    // instead of wiping it (value binds to app.code).
+    oninput: (e) => { e.target.value = e.target.value.toUpperCase(); intents.setCode(e.target.value); },
   });
 
   return shell(
@@ -320,6 +323,9 @@ function configEditor(app, intents) {
     toggleRow('Show guessed words to everyone', c.showGuessedWords,
       () => intents.setConfig({ showGuessedWords: !c.showGuessedWords }),
       'When on, the turn recap lists the guessed words for all to see. Turn off to keep the recurring bowl secret — only the clue-giver who just played sees the words; everyone else sees the count.'),
+    toggleRow('Carry leftover time into next round', c.carryOverTime,
+      () => intents.setConfig({ carryOverTime: !c.carryOverTime }),
+      'If the clue-giver empties the bowl with time to spare, they keep that time and clue the next round too — instead of the turn passing to the next team. On the final round the game just ends as usual.'),
   );
 }
 
@@ -488,15 +494,20 @@ function turnReadyScreen(app, intents) {
   const pub = app.pub;
   const priv = app.priv || {};
   const team = pub.teams[pub.currentTeamIndex];
+  const carrying = pub.carryMs != null;                 // resuming with carried-over time
+  const carryLabel = carrying ? formatTime(pub.carryMs) : null;
   const children = [wordmark(intents), boardHead(pub), scoreboard(pub, app)];
 
   if (priv.isUpNext) {
     children.push(panel(null,
-      el('p', { class: 'big-prompt' }, 'You’re the clue-giver!'),
+      el('p', { class: 'big-prompt' }, carrying ? 'Keep going!' : 'You’re the clue-giver!'),
       el('p', { class: 'tagline' }, pub.round.rule),
-      el('p', { class: 'fine' }, 'Hold your phone so only you can see it. Tap Start when your team is ready.'),
+      el('p', { class: 'fine' }, carrying
+        ? `You cleared the bowl — you kept ${carryLabel}, and it's on the clock the moment you continue.`
+        : 'Hold your phone so only you can see it. Tap Start when your team is ready.'),
       el('div', { class: 'btn-row' },
-        el('button', { class: 'btn btn-primary btn-xl', onclick: () => intents.startTurn() }, '▶ START TURN')),
+        el('button', { class: 'btn btn-primary btn-xl', onclick: () => intents.startTurn() },
+          carrying ? `▶ CONTINUE · ${carryLabel}` : '▶ START TURN')),
     ));
     if (app.me.isHost) {
       children.push(el('div', { class: 'btn-row' },
@@ -506,7 +517,9 @@ function turnReadyScreen(app, intents) {
     children.push(panel(null,
       el('p', { class: 'big-prompt', style: team ? `color:${team.color}` : '' }, `${team ? team.name : ''} are up`),
       clueGiverLine(pub),
-      el('p', { class: 'tagline' }, 'Get ready to guess out loud. Waiting for the clue-giver to start…'),
+      el('p', { class: 'tagline' }, carrying
+        ? `Cleared the bowl with ${carryLabel} to spare — same clue-giver keeps going.`
+        : 'Get ready to guess out loud. Waiting for the clue-giver to start…'),
       el('div', { class: 'spinner' }),
     ));
     if (app.me.isHost) {
@@ -626,34 +639,43 @@ function turnSummaryScreen(app, intents) {
   const team = s ? pub.teams[s.teamIndex] : null;
   const nextTeam = pub.teams[pub.currentTeamIndex];
 
+  const carrying = !!(s && s.carry);           // same clue-giver continues next round
   const roundEnding = pub.bowlRemaining === 0; // next continue lands on the round break
+  const cluerName = pub.clueGiver ? pub.clueGiver.name : 'The clue-giver';
 
   const children = [
     wordmark(intents),
     el('div', { class: 'summary-banner', style: team ? `--team:${team.color};--team-dim:${team.dim}` : '' },
-      el('div', { class: 'summary-eyebrow' }, s && s.reason === 'time' ? 'TIME!' : 'TURN OVER'),
+      el('div', { class: 'summary-eyebrow' }, carrying ? 'BOWL CLEARED!' : (s && s.reason === 'time' ? 'TIME!' : 'TURN OVER')),
       el('div', { class: 'summary-score', style: team ? `color:${team.color}` : '' },
         `+${s ? s.scored : 0}`),
       el('div', { class: 'summary-team' }, team ? team.name : ''),
     ),
     guessReviewPanel(s, priv, intents),
-    el('div', { class: 'next-up' },
-      el('span', { class: 'team-dot', style: nextTeam ? `--team:${nextTeam.color}` : '' }),
-      'Up next: ', el('strong', {}, nextTeam ? nextTeam.name : '—'),
-      pub.clueGiver ? el('span', { class: 'muted' }, ` · ${pub.clueGiver.name}`) : null,
-    ),
+    carrying
+      ? el('div', { class: 'next-up' },
+          el('span', { class: 'team-dot', style: team ? `--team:${team.color}` : '' }),
+          el('strong', {}, cluerName),
+          ` keeps ${formatTime(pub.carryMs || 0)} — ${roundEnding ? 'clues the next round too.' : 'finishes this round.'}`,
+        )
+      : el('div', { class: 'next-up' },
+          el('span', { class: 'team-dot', style: nextTeam ? `--team:${nextTeam.color}` : '' }),
+          'Up next: ', el('strong', {}, nextTeam ? nextTeam.name : '—'),
+          pub.clueGiver ? el('span', { class: 'muted' }, ` · ${pub.clueGiver.name}`) : null,
+        ),
     scoreboard(pub, app),
   ];
 
   if (priv.canContinue) {
     children.push(el('div', { class: 'btn-row' },
       el('button', { class: 'btn btn-primary', onclick: () => intents.continueTurn() },
-        roundEnding ? '> FINISH ROUND' : '> NEXT TURN')));
+        carrying ? '> CONTINUE' : (roundEnding ? '> FINISH ROUND' : '> NEXT TURN'))));
   } else {
-    children.push(el('p', { class: 'fine' }, 'Waiting for the next turn to begin…'));
+    children.push(el('p', { class: 'fine' },
+      carrying ? 'Waiting for the clue-giver to continue…' : 'Waiting for the next turn to begin…'));
   }
 
-  return shell(...children, liveRegion('Turn over'));
+  return shell(...children, liveRegion(carrying ? 'Bowl cleared — clue-giver keeps their time' : 'Turn over'));
 }
 
 // The guessed-word recap. For the clue-giver who just played (when review is

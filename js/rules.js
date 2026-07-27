@@ -33,6 +33,11 @@ export const DEFAULTS = Object.freeze({
                        // to EVERYONE? Off = only the clue-giver who just played
                        // sees the words; others see counts only. Keeps the
                        // recurring bowl secret since the same words come back.
+  carryOverTime: false,// if the clue-giver empties the bowl with time to spare,
+                       // do they KEEP that time and clue the next round too
+                       // (instead of the turn passing to the next team)? Off =
+                       // classic hand-off. On the final round there is nothing
+                       // to carry into, so the game just ends as usual.
 });
 
 export const LIMITS = Object.freeze({
@@ -122,6 +127,7 @@ export function normalizeConfig(cfg = {}) {
     allowSkip:      !!c.allowSkip,
     reviewGuesses:  !!c.reviewGuesses,
     showGuessedWords: !!c.showGuessedWords,
+    carryOverTime:  !!c.carryOverTime,
   };
 }
 

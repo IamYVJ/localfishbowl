@@ -610,6 +610,7 @@ function ownerControl(p2pFn, wireMsg) {
 
 const intents = {
   setName: (n) => { app.me.name = n; saveName(n); },
+  setCode: (c) => { app.code = (c || '').toUpperCase().slice(0, 4); saveCode(app.code); },
   gotoJoin: () => { app.screen = 'join'; app.error = ''; startDiscovery(); draw(); },
   goHome: () => {
     teardownNet();
@@ -703,21 +704,45 @@ function resumeSession() {
 // Best-effort liveness probe for the optional authoritative server. Runs only
 // when a server is configured (config.js). On success it flips app.serverUp,
 // which is the SINGLE gate for every piece of server-mode UI — so a missing or
-// unreachable server leaves the app byte-for-byte pure P2P. Short timeout; never
-// blocks boot. resumeSession() runs FIRST (below) so it sees serverUp === false
-// and only ever restores a P2P session.
+// unreachable server leaves the app byte-for-byte pure P2P. Never blocks boot;
+// resumeSession() runs FIRST (below) so it sees serverUp === false and only ever
+// restores a P2P session.
+//
+// We RETRY with backoff instead of probing once: the first request to the server
+// (a Tailscale host) is cold — fresh DNS + TLS + relay path — and on the very
+// first page load it competes with the service-worker install, the PeerJS
+// download and font fetches, so a single tight-timeout probe frequently loses the
+// race and the online options never appear until a manual reload. The first
+// attempt warms the DNS/TLS path; a follow-up then lands. Each attempt is capped
+// so a hung request can't stall the chain, and the first success wins and stops.
 function checkServerHealth() {
   if (!SERVER_URL || !SERVER_HEALTH) return;   // server mode disabled
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 1500);
-  fetch(SERVER_HEALTH, { signal: ctrl.signal, cache: 'no-store' })
-    .then((res) => { if (!res.ok) throw new Error('health'); return res.json(); })
-    .then(() => {
-      app.serverUp = true;
-      if (app.screen === 'home') draw();        // reveal the "Host online" option
-    })
-    .catch(() => { /* unreachable — stay in the pure-P2P UI */ })
-    .finally(() => clearTimeout(timer));
+
+  const ATTEMPTS = 3;
+  const ATTEMPT_TIMEOUT_MS = 2500;             // per-attempt cap
+  const RETRY_DELAYS_MS = [600, 1500];         // gaps AFTER attempts 1 and 2
+
+  const probeOnce = () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ATTEMPT_TIMEOUT_MS);
+    return fetch(SERVER_HEALTH, { signal: ctrl.signal, cache: 'no-store' })
+      .then((res) => { if (!res.ok) throw new Error('health'); return res.json(); })
+      .finally(() => clearTimeout(timer));
+  };
+
+  const attempt = (n) => {
+    probeOnce()
+      .then(() => {
+        app.serverUp = true;
+        if (app.screen === 'home') draw();      // reveal the online options
+      })
+      .catch(() => {
+        // Unreachable this time — retry if attempts remain, else stay pure P2P.
+        if (n + 1 < ATTEMPTS) setTimeout(() => attempt(n + 1), RETRY_DELAYS_MS[n] || 1500);
+      });
+  };
+
+  attempt(0);
 }
 
 // ---------------------------------------------------------------------------

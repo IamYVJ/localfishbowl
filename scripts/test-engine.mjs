@@ -299,6 +299,153 @@ section('Review guesses — bowl-emptying turn still gets a recap');
 }
 
 // ===========================================================================
+section('Carry over time — same clue-giver keeps the leftover time into the next round');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, wordsPerPlayer: 1, timerSeconds: 60 });
+  eng.setConfig({ carryOverTime: true });
+  submitAll(eng);
+
+  const cluer = eng.currentClueGiverId;
+  const team = eng.currentTeamIndex;
+  const ptrBefore = eng.cluerPointers[team];
+  eng.startTurn(cluer);
+  // Simulate ~25s still on the clock when the bowl is cleared (a fresh turn
+  // would be the full 60s — the gap is what proves the leftover is carried).
+  eng.turnEndsAt = Date.now() + 25000;
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+
+  ok(eng.phase === PHASES.TURN_SUMMARY, 'clearing the bowl early pauses on the recap');
+  ok(eng.lastTurnSummary.reason === 'empty', 'recap records the bowl was emptied');
+  ok(eng.lastTurnSummary.carry === true, 'recap is flagged as a carry-over');
+  ok(eng.currentTeamIndex === team, 'the team that is up does not change on a carry');
+  ok(eng.currentClueGiverId === cluer, 'the same clue-giver stays up on a carry');
+  ok(eng.cluerPointers[team] === ptrBefore, 'the team rotation cursor is not advanced on a carry');
+  ok(eng.carryMs > 20000 && eng.carryMs <= 25000, `the ~25s leftover is frozen, not a fresh 60s (got ${eng.carryMs})`);
+  ok(eng.publicState().carryMs === eng.carryMs, 'publicState exposes the carried time');
+
+  const carried = eng.carryMs;
+  eng.continueFromSummary(eng.hostId);
+  ok(eng.currentRound === 1, 'continuing a full-bowl carry opens the next round');
+  ok(eng.phase === PHASES.TURN_READY, 'the carried turn is ready to start');
+  ok(eng.currentClueGiverId === cluer, 'the same clue-giver clues the next round');
+  ok(eng.carryMs === carried, 'the carried time stays armed until the turn actually starts');
+  ok(eng.publicState().carryMs === carried, 'the ready screen still sees the carried time');
+
+  eng.startTurn(cluer);
+  ok(eng.carryMs === null, 'the carried time is consumed when the turn starts');
+  const rem = eng.publicState().turnRemainingMs;
+  ok(rem > 20000 && rem <= 25000, `the carried ~25s is on the clock, not a fresh 60s (got ${rem})`);
+
+  // Once the carried turn finally ends (here by timeout), the rotation advances
+  // exactly once — the whole carry consumed a single slot, not one per round.
+  eng.endTurnByTime();
+  ok(eng.currentTeamIndex !== team, 'after the carried turn ends, play hands off to the other team');
+  ok(eng.cluerPointers[team] === ptrBefore + 1, 'the team rotation advanced exactly once across the carry');
+}
+
+// ===========================================================================
+section('Carry over time — off by default (classic hand-off)');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, wordsPerPlayer: 1, timerSeconds: 60 });
+  ok(eng.config.carryOverTime === false, 'carryOverTime defaults off');
+  submitAll(eng);
+
+  const cluer = eng.currentClueGiverId;
+  const team = eng.currentTeamIndex;
+  eng.startTurn(cluer);
+  eng.turnEndsAt = Date.now() + 25000; // time to spare — but the toggle is off
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+
+  ok(eng.phase === PHASES.ROUND_BREAK, 'toggle off: emptying the bowl ends the round as before');
+  ok(eng.carryMs === null, 'toggle off: no time is carried');
+  ok(eng.lastTurnSummary.carry === false, 'toggle off: the recap is not flagged as a carry');
+  ok(eng.currentTeamIndex !== team, 'toggle off: play still hands off to the other team');
+}
+
+// ===========================================================================
+section('Carry over time — never on the final round');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, numRounds: 3, wordsPerPlayer: 1, timerSeconds: 60 });
+  eng.setConfig({ carryOverTime: true });
+  submitAll(eng);
+  eng.currentRound = 2; // jump to the final round (same shared bowl)
+  ok(eng.isFinalRound, 'positioned on the final round');
+
+  const cluer = eng.currentClueGiverId;
+  eng.startTurn(cluer);
+  eng.turnEndsAt = Date.now() + 25000; // time to spare, but nothing to carry into
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+
+  ok(eng.phase === PHASES.ROUND_BREAK, 'the final-round clear ends the game path, not a carry');
+  ok(eng.carryMs === null, 'no time is carried out of the final round');
+  ok(eng.lastTurnSummary.carry === false, 'the final-round recap is not flagged as a carry');
+}
+
+// ===========================================================================
+section('Carry over time — review can send a word back, keeping the same round');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, wordsPerPlayer: 1, timerSeconds: 60 });
+  eng.setConfig({ carryOverTime: true, reviewGuesses: true });
+  submitAll(eng);
+
+  const cluer = eng.currentClueGiverId;
+  const roundBefore = eng.currentRound;
+  eng.startTurn(cluer);
+  eng.turnEndsAt = Date.now() + 25000;
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+  ok(eng.phase === PHASES.TURN_SUMMARY, 'review + carry pauses on the recap');
+  ok(eng.carryMs > 0, 'the leftover time is frozen while the words are reviewed');
+  ok(eng.lastTurnSummary.carry === true, 'the recap is flagged as a carry');
+
+  // Uncheck one guessed word → it returns to the bowl, so the round is NOT done.
+  const wid = eng.lastTurnSummary.items[0].id;
+  eng.reviewGuessedWord(cluer, wid, false);
+  ok(eng.remaining.includes(wid), 'the unchecked word is back in the bowl');
+
+  eng.continueFromSummary(eng.hostId);
+  ok(eng.currentRound === roundBefore, 'a sent-back word keeps the CURRENT round (no advance)');
+  ok(eng.phase === PHASES.TURN_READY, 'the same clue-giver resumes the current round');
+  ok(eng.currentClueGiverId === cluer, 'still the same clue-giver');
+  ok(eng.carryMs > 0, 'the carried time stays armed to finish the current round');
+
+  // Re-clue the returned word with nothing sent back → the round finally advances.
+  eng.startTurn(cluer);
+  ok(eng.carryMs === null, 'the carried time is consumed when the turn resumes');
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+  eng.continueFromSummary(eng.hostId);
+  ok(eng.currentRound === roundBefore + 1, 'with nothing sent back the carry finally advances the round');
+  ok(eng.currentClueGiverId === cluer, 'the same clue-giver carried all the way through');
+}
+
+// ===========================================================================
+section('Carry over time — serialize/restore round-trips the carried clock');
+{
+  const eng = freshGame({ players: 4, numTeams: 2, wordsPerPlayer: 1, timerSeconds: 60 });
+  eng.setConfig({ carryOverTime: true });
+  submitAll(eng);
+  const cluer = eng.currentClueGiverId;
+  eng.startTurn(cluer);
+  eng.turnEndsAt = Date.now() + 25000;
+  while (eng.phase === PHASES.TURN_ACTIVE) eng.gotIt(eng.currentClueGiverId);
+  const carried = eng.carryMs;
+  ok(carried > 0, 'carrying after clearing the bowl');
+
+  const clone = new GameEngine();
+  clone.restore(eng.serialize());
+  ok(clone.carryMs === carried, 'carryMs round-trips through serialize/restore');
+  ok(clone.phase === PHASES.TURN_SUMMARY, 'the carry recap survives a reload');
+  ok(clone.lastTurnSummary.carry === true, 'the carry flag survives the reload');
+  ok(clone.config.carryOverTime === true, 'the carryOverTime toggle survives serialize/restore');
+
+  // Legacy snapshots that predate the field restore cleanly to null.
+  const legacy = eng.serialize();
+  delete legacy.carryMs;
+  const legacyClone = new GameEngine();
+  legacyClone.restore(legacy);
+  ok(legacyClone.carryMs === null, 'a legacy snapshot without carryMs restores to null');
+}
+
+// ===========================================================================
 section('Config: 4th round adds Statue; team count reclamp');
 {
   const eng = freshGame({ numRounds: 4 });

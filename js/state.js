@@ -47,6 +47,8 @@ export class GameEngine {
     this.cluerPointers = [];    // per-team rotation cursor
     this.guessedThisTurn = [];  // word ids guessed during the active turn
     this.turnEndsAt = null;     // host-clock ms when the active turn expires
+    this.carryMs = null;        // carryOverTime: ms the clue-giver keeps into
+                                // the next round after clearing the bowl early
 
     this.scores = [];           // scores[teamIndex][roundIndex] = points
     this.lastTurnSummary = null;// { teamIndex, words[], reason, scored }
@@ -310,7 +312,11 @@ export class GameEngine {
     }
     this.guessedThisTurn = [];
     this._drawNext();
-    this.turnEndsAt = Date.now() + this.config.timerSeconds * 1000;
+    // carryOverTime: resume on the time carried from clearing the bowl last
+    // round (armed in _concludeTurn); otherwise a fresh full-length turn.
+    const ms = this.carryMs != null ? this.carryMs : this.config.timerSeconds * 1000;
+    this.carryMs = null;
+    this.turnEndsAt = Date.now() + ms;
     this.phase = PHASES.TURN_ACTIVE;
     return { ok: true };
   }
@@ -368,8 +374,20 @@ export class GameEngine {
     // Capture who clued BEFORE advancing the cursor — the review step (below)
     // is restricted to the clue-giver who actually just played this turn.
     const cluerId = this.currentClueGiverId;
-    // The clue-giver's turn is over: advance this team's rotation cursor.
-    this.cluerPointers[justPlayed] = (this.cluerPointers[justPlayed] || 0) + 1;
+
+    // carryOverTime: emptying the bowl (round cleared) with time still on the
+    // clock lets the SAME clue-giver keep that time and clue the next round — so
+    // we neither advance this team's rotation cursor nor hand off to the next
+    // team. Never on the final round (nothing to carry into) nor on a timeout.
+    const remainingMs = this.turnEndsAt ? Math.max(0, this.turnEndsAt - Date.now()) : 0;
+    const carrying = reason === 'empty'
+      && this.config.carryOverTime
+      && !this.isFinalRound
+      && remainingMs > 0;
+
+    // The clue-giver's turn is over unless they're carrying: advance this team's
+    // rotation cursor only when we're actually handing off.
+    if (!carrying) this.cluerPointers[justPlayed] = (this.cluerPointers[justPlayed] || 0) + 1;
 
     // Every word scored this turn, kept as toggleable items so the clue-giver
     // can later uncheck a mis-scored one (when review is enabled).
@@ -384,19 +402,24 @@ export class GameEngine {
       items,
       scored: items.length,
       words: items.map(it => it.text),
+      carry: carrying,   // UI hint: this recap leads into a same-player carry-over
     };
 
-    // Pass to the next team (every team is non-empty per start validation).
-    this.currentTeamIndex = (justPlayed + 1) % this.config.numTeams;
+    // Pass to the next team (every team is non-empty per start validation),
+    // unless the clue-giver is carrying their time into the next round.
+    if (!carrying) this.currentTeamIndex = (justPlayed + 1) % this.config.numTeams;
     this.currentWordId = null;
     this.turnEndsAt = null;
     this.guessedThisTurn = [];
+    this.carryMs = carrying ? remainingMs : null;
 
-    // With review on, even a bowl-emptying turn pauses on the recap first so its
-    // words can be corrected; continueFromSummary then routes to the round break
-    // (or back to play if a word was sent back). With review off, an emptied
-    // bowl ends the round straight away, as before.
-    const roundComplete = (reason === 'empty') && !this.config.reviewGuesses;
+    // A carry-over ALWAYS pauses on the recap (so the cleared words show and
+    // review can still adjust them) before the same player resumes next round.
+    // With review on, even an ordinary bowl-emptying turn pauses on the recap so
+    // its words can be corrected; continueFromSummary then routes to the round
+    // break (or back to play if a word was sent back). With review off and no
+    // carry, an emptied bowl ends the round straight away, as before.
+    const roundComplete = (reason === 'empty') && !this.config.reviewGuesses && !carrying;
     this.phase = roundComplete ? PHASES.ROUND_BREAK : PHASES.TURN_SUMMARY;
   }
 
@@ -417,6 +440,7 @@ export class GameEngine {
       round: s.round,
       cluerId: s.cluerId,
       scored: s.scored,
+      carry: s.carry,
       hidden: true,
       items: (s.items || []).map(it => ({ id: it.id, included: it.included })),
       words: [],
@@ -480,6 +504,19 @@ export class GameEngine {
   continueFromSummary(id) {
     if (this.phase !== PHASES.TURN_SUMMARY) return;
     if (id !== this.hostId && id !== this.currentClueGiverId) return;
+
+    // carryOverTime: the same clue-giver keeps their leftover time (carryMs is
+    // still armed — startTurn consumes it). An empty bowl means the round is
+    // genuinely complete, so open the NEXT round; the clue-giver stays the same
+    // because _concludeTurn left the rotation/team cursors untouched. If a word
+    // was sent back during review the round isn't done — the same clue-giver
+    // just finishes the CURRENT round with the carried time.
+    if (this.carryMs != null) {
+      if (!this.remaining.length) { this.currentRound += 1; this._openRound(); }
+      else this.phase = PHASES.TURN_READY;
+      return;
+    }
+
     // If the bowl emptied (incl. after a review left every word counted), the
     // round is over; otherwise hand off to the next clue-giver. With review off
     // the bowl is always non-empty here, so this stays TURN_READY as before.
@@ -560,6 +597,7 @@ export class GameEngine {
       cluerPointers: this.cluerPointers,
       guessedThisTurn: this.guessedThisTurn,
       turnEndsAt: this.turnEndsAt,
+      carryMs: this.carryMs,
       scores: this.scores,
       lastTurnSummary: this.lastTurnSummary,
       suddenDeath: this.suddenDeath,
@@ -585,6 +623,7 @@ export class GameEngine {
       cluerPointers: Array.isArray(s.cluerPointers) ? s.cluerPointers : [],
       guessedThisTurn: Array.isArray(s.guessedThisTurn) ? s.guessedThisTurn : [],
       turnEndsAt: s.turnEndsAt ?? null,
+      carryMs: s.carryMs ?? null,
       scores: Array.isArray(s.scores) ? s.scores : [],
       lastTurnSummary: s.lastTurnSummary ?? null,
       suddenDeath: !!s.suddenDeath,
@@ -688,6 +727,9 @@ export class GameEngine {
       turnRemainingMs: inTurn && this.turnEndsAt
         ? Math.max(0, this.turnEndsAt - Date.now())
         : null,
+      // Time the clue-giver is carrying into the next round (shown on the recap
+      // and the ready screen before they resume); null when not carrying.
+      carryMs: this.carryMs,
 
       lastTurnSummary: this._publicSummary(),
       suddenDeath: this.suddenDeath,
