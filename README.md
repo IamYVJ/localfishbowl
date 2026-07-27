@@ -30,9 +30,14 @@ wins (ties can be settled with a **sudden-death** tiebreaker).
 
 **Host-configurable before the game starts:** words per player (default 5),
 turn timer (default 60s), number of teams (2–4), whether to include the 4th
-Statue round, whether the clue-giver may skip/pass a word (default off), and
+Statue round, whether the clue-giver may skip/pass a word (default off),
 whether the clue-giver may review their guesses after each turn (default off) —
-unchecking a mis-scored word drops the point and returns it to the bowl.
+unchecking a mis-scored word drops the point and returns it to the bowl —
+whether the post-turn recap of guessed words is shown to everyone or only to the
+clue-giver who just played (default shown), which keeps the recurring bowl
+secret when off, and whether a clue-giver who empties the bowl with time to
+spare keeps that leftover time to clue the next round instead of handing off
+(default off).
 
 ## How it works
 
@@ -80,11 +85,19 @@ js/
   net.js                PeerJS networking (BROKER_CONFIG lives at the top)
   ui.js                 rendering (pure view layer)
   util.js               helpers (room code, clipboard, persistence, DOM)
+  config.js             optional server-mode switch (SERVER_URL / SERVER_HEALTH)
   main.js               controller wiring net + engine + UI together
+server/                 optional authoritative WebSocket server (see docs/)
+  index.js              HTTP health + WS bootstrap, hardening (caps, rate limit)
+  session.js            wire protocol / per-connection message handling
+  rooms.js              room + RoomManager (one GameEngine per room)
+  origin.js             WS upgrade Origin allowlist
 icons/                  app icons (svg + generated png)
 scripts/
   gen-icons.js          regenerates the PNG icons (node, no deps)
   test-engine.mjs       headless end-to-end test of the game engine
+  test-server.mjs       headless test of the server wire protocol
+docs/                   design docs (server platform + build plan)
 ```
 
 ## Regenerating icons
